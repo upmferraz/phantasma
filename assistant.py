@@ -55,6 +55,9 @@ def load_skills():
 whisper_model = None
 ollama_client = None
 conversation_history = []
+# --- Cache volátil (em memória) para respostas do Ollama ---
+volatile_cache = {}
+# -----------------------------------------------------------------
 
 # --- Funções de Processamento de IA (Dependentes de Globais) ---
 
@@ -169,34 +172,45 @@ def route_and_respond(user_prompt):
         # 5. FALLBACK: OLLAMA (Se nenhuma skill foi ativada)
         if llm_response is None:
             
-            # --- Verificação de Carga do Sistema ---
-            try:
-                cpu_cores = os.cpu_count() or 1 # Obtém o nº de núcleos (fallback para 1)
-                load_threshold = cpu_cores * 0.75 # Define o limite em 75% da capacidade
-                load_1min, _, _ = os.getloadavg() # Pega no 'load average' de 1 min
-                
-                if load_1min > load_threshold:
-                    print(f"AVISO: Carga do sistema alta ({load_1min:.2f} > {load_threshold:.2f}). A chamada ao Ollama foi ignorada.")
-                    llm_response = "O sistema está um pouco ocupado agora, chefe. Tenta perguntar-me isso daqui a um bocado."
-                    
-            except Exception as e:
-                print(f"AVISO: Não foi possível verificar a carga do sistema: {e}")
-            # --------------------------------------------------
-
+            # --- Verificação do Cache Volátil ---
+            if user_prompt in volatile_cache:
+                print("CACHE: Resposta encontrada no cache volátil.")
+                llm_response = volatile_cache[user_prompt]
+            
+            # Se NÃO estava no cache (llm_response ainda é None)
             if llm_response is None:
-                thinking_phrases = [
-                    "Deixa-me pensar sobre esse assunto um bocadinho...",
-                    "Ok, chefe. A processar isso!",
-                    "Estou a ver... espera um segundo.",
-                    "Boa pergunta! Vou verificar os meus circuitos."
-                ]
-                play_tts(random.choice(thinking_phrases))
-                
-                # <--- LINHA REMOVIDA DAQUI ---
-                # save_to_rag(user_prompt) # <-- REMOVIDO
-                # -----------------------------
-                
-                llm_response = process_with_ollama(prompt=user_prompt)
+                # --- Verificação de Carga do Sistema ---
+                try:
+                    cpu_cores = os.cpu_count() or 1 # Obtém o nº de núcleos (fallback para 1)
+                    load_threshold = cpu_cores * 0.75 # Define o limite em 75% da capacidade
+                    load_1min, _, _ = os.getloadavg() # Pega no 'load average' de 1 min
+                    
+                    if load_1min > load_threshold:
+                        print(f"AVISO: Carga do sistema alta ({load_1min:.2f} > {load_threshold:.2f}). A chamada ao Ollama foi ignorada.")
+                        llm_response = "O sistema está um pouco ocupado agora, chefe. Tenta perguntar-me isso daqui a um bocado."
+                        
+                except Exception as e:
+                    print(f"AVISO: Não foi possível verificar a carga do sistema: {e}")
+                # --------------------------------------------------
+
+                if llm_response is None:
+                    
+                    # --- REPOSTO: Bloco 'thinking_phrases' ---
+                    thinking_phrases = [
+                        "Deixa-me pensar sobre esse assunto um bocadinho...",
+                        "Ok, chefe. A processar isso!",
+                        "Estou a ver... espera um segundo.",
+                        "Boa pergunta! Vou verificar os meus circuitos."
+                    ]
+                    play_tts(random.choice(thinking_phrases))
+                    # ------------------------------------------
+                    
+                    llm_response = process_with_ollama(prompt=user_prompt)
+
+                    # --- Guardar no Cache Volátil ---
+                    if llm_response and "Ocorreu um erro" not in llm_response:
+                        print(f"CACHE: A guardar resposta para o prompt: '{user_prompt}'")
+                        volatile_cache[user_prompt] = llm_response
         
         # --- Processamento da Resposta ---
         
@@ -329,7 +343,9 @@ def main_loop():
                     stream.close()
                     stream = None
                     
-                    play_random_music_snippet()
+                    # --- REMOVIDO: Snippet de música ---
+                    # play_random_music_snippet()
+                    # -----------------------------------
                     
                     greetings = ["Estou a postos!", "Aqui estou!", "Diz lá, chefe!", "Bumblebee ao teu dispor!"]
                     greeting = random.choice(greetings)
