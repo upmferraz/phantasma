@@ -4,11 +4,13 @@ import config
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "startswith"
-TRIGGERS = ["pergunta à gemini", "o que diz a gemini", "pede à gemini"]
+# Os teus triggers, como definiste
+TRIGGERS = ["pergunta à gemini", "o que diz a gemini", "pede à gemini", "pergunta à google"]
 
-# --- Constantes da API Gemini ---
-# Usamos o modelo gemini-pro, que é o mais comum para texto
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent"
+# --- Constantes da API Gemini (FINALMENTE CORRIGIDO) ---
+# Usamos o modelo exato que o teu teste "ListModels" retornou
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL_NAME}:generateContent"
 
 def handle(user_prompt_lower, user_prompt_full):
     """
@@ -35,7 +37,8 @@ def handle(user_prompt_lower, user_prompt_full):
         print("AVISO (Skill Gemini): Trigger detetado, mas sem pergunta.")
         return "Sim, seyon? O que é que querias que eu perguntasse aos meus amigos?"
 
-    print(f"A enviar pergunta para o Gemini: '{question}'")
+    # Print de debug melhorado
+    print(f"A enviar pergunta para o Gemini (Modelo: {GEMINI_MODEL_NAME}): '{question}'")
 
     # 3. Preparar e Enviar o Pedido para a API
     headers = {
