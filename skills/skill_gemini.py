@@ -4,10 +4,20 @@ import config
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "startswith"
-# Os teus triggers, como definiste
-TRIGGERS = ["pergunta à gemini", "o que diz a gemini", "pede à gemini", "pergunta à google"]
 
-# --- Constantes da API Gemini (FINALMENTE CORRIGIDO) ---
+# --- AJUSTADO: Adicionadas versões "a" (sem crase) ---
+TRIGGERS = [
+    "pergunta à gemini", 
+    "pergunta a gemini", 
+    "o que diz a gemini", 
+    "pede à gemini", 
+    "pergunta à google",
+    "pergunta a google",
+    "pergunta ao google",
+    "pergunta à tua amiga"
+]
+
+# --- Constantes da API Gemini ---
 # Usamos o modelo exato que o teu teste "ListModels" retornou
 GEMINI_MODEL_NAME = "gemini-2.5-flash"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL_NAME}:generateContent"
