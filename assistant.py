@@ -187,7 +187,7 @@ def route_and_respond(user_prompt):
                     
                     if load_1min > load_threshold:
                         print(f"AVISO: Carga do sistema alta ({load_1min:.2f} > {load_threshold:.2f}). A chamada ao Ollama foi ignorada.")
-                        llm_response = "O sistema está um pouco ocupado agora, chefe. Tenta perguntar-me isso daqui a um bocado."
+                        llm_response = "O sistema está um pouco ocupado agora. Tenta perguntar-me isso daqui a um bocado."
                         
                 except Exception as e:
                     print(f"AVISO: Não foi possível verificar a carga do sistema: {e}")
@@ -198,7 +198,7 @@ def route_and_respond(user_prompt):
                     # --- REPOSTO: Bloco 'thinking_phrases' ---
                     thinking_phrases = [
                         "Deixa-me pensar sobre esse assunto um bocadinho...",
-                        "Ok, chefe. A processar isso!",
+                        "Ok, deixa lá ver...",
                         "Estou a ver... espera um segundo.",
                         "Boa pergunta! Vou verificar os meus circuitos."
                     ]
@@ -347,7 +347,7 @@ def main_loop():
                     # play_random_music_snippet()
                     # -----------------------------------
                     
-                    greetings = ["Estou a postos!", "Aqui estou!", "Diz lá, chefe!", "Bumblebee ao teu dispor!"]
+                    greetings = ["Estou a postos!", "Aqui estou!", "Diz lá.", "Ao teu dispor!"]
                     greeting = random.choice(greetings)
                     play_tts(greeting)
                     

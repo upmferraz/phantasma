@@ -10,7 +10,7 @@ TRIGGERS = [
     "sensor de gás", 
     "sensor do gás", 
     "nível do gás", 
-    "ppm", 
+    "está o gás",
     "monóxido"
 ]
 
