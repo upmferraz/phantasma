@@ -305,7 +305,7 @@ Este *core* (e a sua arquitetura *skill*) é o motor que traduz o comando de uti
 
 ## 4. Resolução de Problemas Comuns (Troubleshooting) 🛠️
 
-* **Falha de Conexão (Tuya/Miio):** Quase sempre devido a uma falha na **Reserva de DHCP** (o IP do dispositivo mudou) ou a um **Token/Chave Local** incorreto. Verifique a tabela de DHCP do seu *router* e volte a extrair as chaves se necessário.
+* **Falha de Ligação (Tuya/Miio):** Quase sempre devido a uma falha na **Reserva de DHCP** (o IP do dispositivo mudou) ou a um **Token/Chave Local** incorreto. Verifique a tabela de DHCP do seu *router* e volte a extrair as chaves se necessário.
 * **Controlo Não Funciona:** Verifique se as dependências (`tinytuya`, `python-miio`) estão instaladas no ambiente virtual ativo e se o `phantasma_core.py` está a ser executado.
 
 ### Notas finais:

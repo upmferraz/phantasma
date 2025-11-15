@@ -197,7 +197,7 @@ def route_and_respond(user_prompt):
                     
                     # --- REPOSTO: Bloco 'thinking_phrases' ---
                     thinking_phrases = [
-                        "Deixa-me pensar sobre esse assunto um bocadinho...",
+                        "Deixa-me pensar sobre esse assunto e já te digo algo...",
                         "Ok, deixa lá ver...",
                         "Estou a ver... espera um segundo.",
                         "Boa pergunta! Vou verificar os meus circuitos."
@@ -294,7 +294,205 @@ def get_help():
         print(f"ERRO no endpoint /help: {e}")
         return jsonify({"status": "erro", "message": str(e)}), 500
 
-def start_api_server(host='localhost', port=5000):
+@app.route("/")
+def get_frontend_ui():
+    """ Serve a página HTML principal do frontend """
+    
+    # Todo o HTML e JS estão aqui. Não precisamos de ficheiros separados.
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="pt">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Phantasma UI</title>
+        <style>
+            body { font-family: sans-serif; background: #111; color: #eee; display: flex; height: 100vh; margin: 0; }
+            #sidebar { width: 250px; background: #222; padding: 10px; border-right: 1px solid #444; overflow-y: auto; }
+            #main { flex: 1; display: flex; flex-direction: column; }
+            #chat-log { flex: 1; padding: 15px; overflow-y: auto; border-bottom: 1px solid #444; }
+            #chat-input-box { display: flex; padding: 10px; background: #222; }
+            #chat-input { flex: 1; background: #333; color: #fff; border: 1px solid #555; padding: 10px; border-radius: 5px; }
+            #chat-send { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 10px; border-radius: 5px; cursor: pointer; }
+            .device-group { margin-bottom: 20px; }
+            .device-group h3 { margin-bottom: 5px; color: #0099ff; }
+            .device-btn { display: inline-block; background: #444; padding: 5px 8px; margin: 2px; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+            .btn-on { border: 1px solid #4CAF50; }
+            .btn-off { border: 1px solid #f44336; }
+            .msg { margin-bottom: 10px; }
+            .msg-user { color: #aaa; text-align: right; }
+            .msg-ia { color: #ddd; background: #2a2a2a; padding: 8px; border-radius: 5px; }
+        </style>
+    </head>
+    <body>
+        <div id="sidebar">
+            <h2>Dispositivos</h2>
+            <div id="device-list"></div>
+        </div>
+        <div id="main">
+            <div id="chat-log">
+                <div class="msg msg-ia">Olá! Dispositivos a carregar...</div>
+            </div>
+            <div id="chat-input-box">
+                <input type="text" id="chat-input" placeholder="Escreve um comando (ex: como está o tempo?)...">
+                <button id="chat-send">Enviar</button>
+            </div>
+        </div>
+
+        <script>
+            const chatLog = document.getElementById('chat-log');
+            const chatInput = document.getElementById('chat-input');
+            const chatSend = document.getElementById('chat-send');
+            const deviceListDiv = document.getElementById('device-list');
+
+            // --- 1. Adiciona mensagens ao Chat ---
+            function addToChatLog(text, sender = 'ia') {
+                const msgDiv = document.createElement('div');
+                msgDiv.classList.add('msg', sender === 'user' ? 'msg-user' : 'msg-ia');
+                msgDiv.innerText = text;
+                chatLog.appendChild(msgDiv);
+                chatLog.scrollTop = chatLog.scrollHeight; // Auto-scroll
+            }
+
+            // --- 2. Envia comandos do chat (para o endpoint /comando) ---
+            async function sendChatCommand() {
+                const prompt = chatInput.value;
+                if (!prompt) return;
+                
+                addToChatLog(prompt, 'user');
+                chatInput.value = '';
+
+                try {
+                    const response = await fetch('/comando', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ prompt: prompt })
+                    });
+                    const data = await response.json();
+                    
+                    // A resposta do /comando já tem o TTS, aqui só mostramos no log
+                    if (data.response) {
+                        addToChatLog(data.response, 'ia');
+                    }
+                } catch (err) {
+                    addToChatLog('Erro a ligar à API /comando: ' + err, 'ia');
+                }
+            }
+
+            // --- 3. Envia ações dos botões (para o novo endpoint /device_action) ---
+            async function handleDeviceAction(device, action) {
+                const prompt = `${action} ${device}`;
+                addToChatLog(`A executar: ${prompt}`, 'user');
+
+                try {
+                    const response = await fetch('/device_action', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ device: device, action: action })
+                    });
+                    const data = await response.json();
+                    
+                    if (data.response) {
+                        addToChatLog(data.response, 'ia');
+                    }
+                } catch (err) {
+                    addToChatLog('Erro a ligar à API /device_action: ' + err, 'ia');
+                }
+            }
+
+            // --- 4. Carrega os botões dos dispositivos (do novo endpoint /get_devices) ---
+            async function loadDevices() {
+                try {
+                    const response = await fetch('/get_devices');
+                    const data = await response.json();
+                    
+                    deviceListDiv.innerHTML = ''; // Limpa
+                    
+                    for (const skillName in data.devices) {
+                        const devices = data.devices[skillName];
+                        if (devices.length > 0) {
+                            const groupDiv = document.createElement('div');
+                            groupDiv.classList.add('device-group');
+                            groupDiv.innerHTML = `<h3>${skillName.replace('skill_', '')}</h3>`;
+                            
+                            devices.forEach(device => {
+                                const onBtn = `<span class="device-btn btn-on" onclick="handleDeviceAction('${device}', 'ligar')">Ligar</span>`;
+                                const offBtn = `<span class="device-btn btn-off" onclick="handleDeviceAction('${device}', 'desligar')">Desligar</span>`;
+                                groupDiv.innerHTML += `<p><strong>${device}</strong><br>${onBtn} ${offBtn}</p>`;
+                            });
+                            deviceListDiv.appendChild(groupDiv);
+                        }
+                    }
+                    addToChatLog('Dispositivos carregados.', 'ia');
+                } catch (err) {
+                    addToChatLog('Erro a carregar dispositivos: ' + err, 'ia');
+                }
+            }
+
+            // --- Event Listeners ---
+            chatSend.addEventListener('click', sendChatCommand);
+            chatInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') sendChatCommand();
+            });
+
+            // --- Início ---
+            loadDevices();
+
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
+
+@app.route("/get_devices")
+def get_devices_list():
+    """
+    Endpoint da API para o frontend saber que botões desenhar.
+    Lê a SKILLS_LIST global.
+    """
+    global SKILLS_LIST
+    device_map = {}
+    
+    # Skills que sabemos que controlam dispositivos
+    DEVICE_SKILL_NAMES = ["skill_cloogy", "skill_tuya", "skill_xiaomi"]
+    
+    for skill in SKILLS_LIST:
+        skill_name = skill.get("name")
+        if skill_name in DEVICE_SKILL_NAMES:
+            # Os 'triggers' destas skills são os nomes dos dispositivos
+            device_map[skill_name] = skill.get("triggers", [])
+            
+    return jsonify({"status": "ok", "devices": device_map})
+
+@app.route("/device_action", methods=['POST'])
+def handle_device_action():
+    """
+    Endpoint da API para os botões (Ligar/Desligar).
+    Isto constrói um prompt e envia-o para o router principal.
+    """
+    try:
+        data = request.json
+        device = data.get('device')
+        action = data.get('action') # "ligar" ou "desligar"
+        
+        if not device or not action:
+            return jsonify({"status": "erro", "message": "Ação ou Dispositivo em falta"}), 400
+            
+        # Construímos um prompt de voz simulado
+        prompt = f"{action} o {device}" 
+        
+        print(f"\n[Comando WebUI Recebido]: {prompt}")
+        
+        # Enviamos para o mesmo router que o áudio e a API usam
+        response_text = route_and_respond(prompt)
+        
+        return jsonify({"status": "ok", "action": "comando_processado", "response": response_text})
+        
+    except Exception as e:
+        print(f"ERRO no endpoint /device_action: {e}")
+        return jsonify({"status": "erro", "message": str(e)}), 500
+
+def start_api_server(host='0.0.0.0', port=5000):
     """ Inicia o servidor Flask (sem os logs normais). """
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
@@ -347,7 +545,7 @@ def main_loop():
                     # play_random_music_snippet()
                     # -----------------------------------
                     
-                    greetings = ["Estou a postos!", "Aqui estou!", "Diz lá.", "Ao teu dispor!"]
+                    greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ao teu dispor!", "Sim?"]
                     greeting = random.choice(greetings)
                     play_tts(greeting)
                     

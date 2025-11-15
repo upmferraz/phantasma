@@ -19,7 +19,8 @@ def handle(user_prompt_lower, user_prompt_full):
         "Mist": "Névoa",
         "Fog": "Nevoeiro",
         "Patchy rain possible": "Possibilidade de aguaceiros",
-        "Patchy rain nearby": "Aguaceiros nas proximidades", # <--- ADICIONADO
+        "Patchy rain nearby": "Aguaceiros nas proximidades",
+        "Shower in vicinity": "Aguaceiros nas proximidades",
         "Patchy light rain": "Aguaceiros fracos",
         "Light rain": "Chuva fraca",
         "Light rain shower": "Aguaceiros fracos",
