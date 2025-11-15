@@ -65,25 +65,26 @@ ollama create llama3:8b-instruct-8k -f Modelfile_Llama3_8k
 
 ### 4. Ambiente Python (Venv)
 
-É **altamente recomendado** recriar o `venv` para garantir que não tens bibliotecas antigas (como o Pocketsphinx).
 
-# Navega para a pasta do projeto
+# Vai para a pasta do projeto
 cd /opt/phantasma
 
-# Apaga o venv antigo (se existir)
+# Apaga o venv antigo (o 3.12)
 rm -rf venv
 
-# Cria um venv limpo
+# O 'pyenv' vai garantir que 'python3' aponta para o 3.11.9
 python3 -m venv venv
 
-# Ativa o venv
+# Ativa o venv novo e correto (3.11.9)
 source venv/bin/activate
 
-# Atualiza o pip
-pip install --upgrade pip
+# Verifica (Opcional):
+# which python3
+# # Deve apontar para /opt/phantasma/venv/bin/python3
 
-# Instala todas as dependências necessárias
-pip install sounddevice openai-whisper ollama torch httpx flask pvporcupine
+# Instala tudo no venv 3.11.9
+pip install --upgrade pip
+pip install sounddevice openai-whisper ollama torch httpx flask pvporcupine dio-chacon-wifi-api
 
 ## Configuração
 
