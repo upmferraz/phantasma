@@ -211,6 +211,138 @@ Para adicionar uma nova funcionalidade (ex: "abrir o portão"):
 3.  Cria a função `handle(user_prompt_lower, user_prompt_full)` que executa a lógica.
 4.  Reinicia o serviço (`systemctl restart phantasma`). O assistente irá carregar a nova *skill* automaticamente.
 
+## ⚙️ Integração de Dispositivos Domésticos (Skills de IoT)
+
+O Phantasma utiliza *skills* dedicadas (`skill_xiaomi.py`, `skill_tuya.py`) para o controlo **100% local** dos dispositivos, cumprindo a filosofia **offline-first** do projeto.
+
+### ❗ CRÍTICO: Reserva de DHCP
+
+Para que o controlo local funcione de forma fiável, é **obrigatório** definir uma **Reserva de DHCP (IP Estático)** no seu router para o **MAC Address** de cada dispositivo. Se o IP mudar, a *skill* falhará.
+
+---
+
+## 1. Skill Tuya (SmartLife)
+
+Esta *skill* permite o controlo local de dispositivos Tuya/SmartLife (tomadas, exaustores, luzes).
+
+### A. Dependências
+
+É necessário instalar a biblioteca Python para controlo local. Use o terminal (ou abra o ficheiro com o seu editor de eleição, como **Vim**, para inspecionar):
+
+```bash
+pip install tinytuya
+
+### B. Obter Chaves (Device ID e Local Key)
+
+O controlo local Tuya exige o **Device ID (`id`)** e a **Local Key (`key`)** de cada dispositivo. O método mais fiável é através da **Plataforma de Desenvolvimento Tuya IoT** e da ferramenta `tuya-cli wizard`.
+
+1.  Crie um projeto em [https://iot.tuya.com/](https://iot.tuya.com/) e ligue-o à sua app SmartLife (via scan de QR Code).
+2.  Execute a ferramenta de linha de comandos `tuya-cli wizard` e forneça as chaves de API e Segredo do seu projeto para extrair a **Local Key** de 16 ou 32 caracteres.
+
+### C. Estrutura do `config.py`
+
+Defina os seus dispositivos no dicionário `TUYA_DEVICES` em `config.py`. O Phantasma usa o nome do dispositivo para determinar o código **DPS** (Data Point Switch).
+
+| Dispositivo | DPS ON/OFF | Protocolo Status | Observação |
+| :--- | :---: | :---: | :--- |
+| Exaustor, Tomada, Desumidificador | 1 | 3.3 | DPS 1 é o padrão para switches. |
+| Lâmpada (Luz) | 20 | 3.3 | DPS 20 é o padrão para dispositivos de iluminação mais avançados (Cor, Brilho, etc.). |
+| Sensor de T/H | N/A | 3.1 | Leitura de status usa o protocolo mais antigo. |
+
+**Exemplo Completo do `config.py`:**
+
+```python
+# config.py
+
+TUYA_DEVICES = {
+    # Exaustores e Tomadas (DPS 1)
+    "exaustor 1": {
+        "ip": "10.0.0.107",       
+        "id": "ID_DO_EXAUSTOR_1_32_CHARS",
+        "key": "CHAVE_LOCAL_16_CHARS" 
+    },
+    
+    # Lâmpadas (DPS 20)
+    "luz da sala": {
+        "ip": "10.0.0.118",       
+        "id": "ID_DA_LUZ_32_CHARS",
+        "key": "CHAVE_LOCAL_16_CHARS"
+    },
+    
+    # Sensores de Temperatura/Humidade (Leitura de status v3.1)
+    "sensor do quarto": {
+        "ip": "10.0.0.123",
+        "id": "ID_DO_SENSOR_32_CHARS",
+        "key": "CHAVE_LOCAL_16_CHARS"
+    }
+}
+## 2. Skill Xiaomi (Miio)
+
+Esta *skill* integra dispositivos Mi Home (aspiradores, Yeelight, etc.) através do protocolo **Miio**.
+
+### A. Dependências
+
+Instale a biblioteca de código aberto `python-miio` para a integração:
+
+```bash
+pip install python-miio
+### B. Obter Token
+
+O controlo Miio exige o **Token** (o equivalente à Local Key da Tuya).
+
+O **Token (32 caracteres)** é obtido usando a ferramenta `micloud` ou scripts de extração de terceiros, autenticando-se na nuvem da Xiaomi. Lembre-se de especificar o servidor correto (`de`, `us`, `cn`, etc.) durante a extração.
+
+### C. Estrutura do `config.py`
+
+Defina os seus dispositivos no dicionário `MIIO_DEVICES` em `config.py`.
+
+**Exemplo Completo do `config.py`:**
+
+```python
+# config.py
+
+MIIO_DEVICES = {
+    # Exemplo: Aspirador Robot (usa a classe ViomiVacuum)
+    "robot da sala": {
+        "ip": "10.0.0.X",
+        "token": "SEU_TOKEN_32_CHARS_ASPIRADOR" # <-- Token de 32 caracteres
+    },
+    
+    # Exemplo: Lâmpada Yeelight (usa a classe Yeelight)
+    "luz da cabeceira": {
+        "ip": "10.0.0.Y",
+        "token": "SEU_TOKEN_32_CHARS_LUZ"
+    }
+}
+## 3. Execução e Controlo do Sistema Phantasma
+
+O projeto Phantasma é executado como um serviço Python. O controlo dos dispositivos é acionado através de comandos de linha de comandos ou, tipicamente, por uma interface de voz/mensagem externa que interage com os *skills*.
+
+### A. Estrutura de Execução
+
+Recomenda-se a utilização de um ambiente virtual Python (venv) para isolar as dependências e iniciar o serviço principal (`phantasma_core.py`).
+
+1. **Ativar o Ambiente Virtual:**
+
+```bash
+source venv/bin/activate
+
+### B. Comandos de Controlo de Dispositivos (Interação Direta)
+
+Embora o Phantasma seja concebido para ser ativado por voz ou *scripts* externos, pode testar o controlo de dispositivos diretamente através do *core* se este expuser uma API ou *endpoint*. Para a filosofia *local-first*, o controlo baseia-se na identificação do dispositivo configurado em `config.py`.
+
+* **Exemplo de comando Tuya (Exaustor):** O core envia um comando para ligar/desligar o **DPS 1**.
+* **Exemplo de comando Miio (Robot):** O core invoca o método `start_clean` da classe `ViomiVacuum`.
+
+Este *core* (e a sua arquitetura *skill*) é o motor que traduz o comando de utilizador (ex: "Liga exaustor 1") nas chamadas de controlo local `tinytuya` ou `python-miio`.
+
+---
+
+## 4. Resolução de Problemas Comuns (Troubleshooting) 🛠️
+
+* **Falha de Conexão (Tuya/Miio):** Quase sempre devido a uma falha na **Reserva de DHCP** (o IP do dispositivo mudou) ou a um **Token/Chave Local** incorreto. Verifique a tabela de DHCP do seu *router* e volte a extrair as chaves se necessário.
+* **Controlo Não Funciona:** Verifique se as dependências (`tinytuya`, `python-miio`) estão instaladas no ambiente virtual ativo e se o `phantasma_core.py` está a ser executado.
+
 ### Notas finais:
 Este bot originalmente era (e ainda é) previsto ter o nome phantasma, mas ainda não foi possível com os testes executados uma hotword funcional, nem sequer usar o sistema para hotwords originalmente previsto que não tinha o requisito de necessitar de uma licença como com o openwakeword, mas era ter falso-positivos com a palavra OH, ou ter o modelo completamente surdo com qualquer outra palavra, acabei por acatar e seguir com o pvporcupine, que irá necessitar da ativação de uma chave (gratuito para um dispositivo).
 O código deste modelo e até idealização do projeto, e até mesmo este readme é fortemente gerado pelo Google Gemini.
