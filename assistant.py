@@ -31,21 +31,21 @@ def load_skills():
     """ Carrega dinamicamente todas as 'skills' da pasta /skills """
     print("A carregar skills...")
     skill_files = glob.glob(os.path.join(config.SKILLS_DIR, "skill_*.py"))
-    
+
     for f in skill_files:
         try:
             skill_name = os.path.basename(f)[:-3]
             spec = importlib.util.spec_from_file_location(skill_name, f)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            
+
             # Regista a skill
             SKILLS_LIST.append({
                 "name": skill_name,
                 "trigger_type": module.TRIGGER_TYPE,
                 "triggers": module.TRIGGERS,
                 "handle": module.handle
-            })
+                })
             print(f"  -> Skill '{skill_name}' carregada.")
         except Exception as e:
             print(f"AVISO: Falha ao carregar a skill {f}: {e}")
@@ -65,22 +65,22 @@ def transcribe_audio(audio_data):
     """ Converte dados de áudio numpy para texto usando Whisper """
     if audio_data.size == 0:
         return ""
-        
+
     print(f"A transcrever áudio (Modelo: {config.WHISPER_MODEL})...")
     try:
         result = whisper_model.transcribe(
-            audio_data, 
-            language='pt', 
-            fp16=False,
-            initial_prompt=config.WHISPER_INITIAL_PROMPT, 
-            no_speech_threshold=0.6 # Filtro anti-"uhh"
-        )
-        
+                audio_data, 
+                language='pt', 
+                fp16=False,
+                initial_prompt=config.WHISPER_INITIAL_PROMPT, 
+                no_speech_threshold=0.6 # Filtro anti-"uhh"
+                )
+
         text = result['text'].strip()
         if not text:
             print("Transcrição (VAD): Nenhum discurso detetado.")
             return "" 
-            
+
         return text
     except Exception as e:
         print(f"Erro na transcrição: {e}")
@@ -93,37 +93,37 @@ def process_with_ollama(prompt):
         return "Desculpe, não o consegui ouvir."
 
     # --- MODIFICADO: RAG Duplo (BD + Web) ---
-    
+
     # 1. Recupera os contextos
     rag_context = retrieve_from_rag(prompt)
     web_context = search_with_searxng(prompt)
-    
+
     # 2. Constrói o prompt final para o LLM
     final_prompt = prompt # A pergunta original
-    
+
     # Adiciona o contexto da web (se existir)
     if web_context:
         final_prompt = f"{web_context}\n\nPERGUNTA: {prompt}"
-    
+
     # Adiciona o contexto da BD (se existir, vem primeiro)
     if rag_context:
         final_prompt = f"{rag_context}\n\n{final_prompt}"
-    
+
     # ----------------------------------------
 
     # 3. Adiciona a pergunta (com contexto) ao histórico
     current_user_message = {'role': 'user', 'content': final_prompt}
     conversation_history.append(current_user_message)
-    
+
     try:
         print(f"A pensar (Ollama: {config.OLLAMA_MODEL_PRIMARY}, Timeout: {config.OLLAMA_TIMEOUT}s)...")
         primary_client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
         response = primary_client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=conversation_history)
         llm_response_content = response['message']['content']
         conversation_history.append({'role': 'assistant', 'content': llm_response_content})
-            
+
         return llm_response_content
-        
+
     except httpx.TimeoutException as e_timeout:
         print(f"\nAVISO: Timeout de {config.OLLAMA_TIMEOUT}s atingido com {config.OLLAMA_MODEL_PRIMARY}.")
         print(f"A tentar com o modelo fallback: {config.OLLAMA_MODEL_FALLBACK}...\n")
@@ -136,7 +136,7 @@ def process_with_ollama(prompt):
             print(f"ERRO: O modelo fallback {config.OLLAMA_MODEL_FALLBACK} também falhou: {e_fallback}")
             conversation_history.pop() # Remove o 'user'
             return "Ocorreu um erro ao processar o seu pedido em ambos os modelos."
-            
+
     except Exception as e:
         print(f"ERRO Ollama ({config.OLLAMA_MODEL_PRIMARY}): {e}")
         conversation_history.pop() # Remove o 'user'
@@ -151,7 +151,7 @@ def route_and_respond(user_prompt):
     try:
         llm_response = None
         user_prompt_lower = user_prompt.lower()
-        
+
         # --- NOVO ROUTER DE SKILLS ---
         for skill in SKILLS_LIST:
             triggered = False
@@ -161,7 +161,7 @@ def route_and_respond(user_prompt):
             elif skill["trigger_type"] == "contains":
                 if any(trigger in user_prompt_lower for trigger in skill["triggers"]):
                     triggered = True
-            
+
             if triggered:
                 print(f"A ativar skill: {skill['name']}")
                 llm_response = skill["handle"](user_prompt_lower, user_prompt)
@@ -171,12 +171,12 @@ def route_and_respond(user_prompt):
 
         # 5. FALLBACK: OLLAMA (Se nenhuma skill foi ativada)
         if llm_response is None:
-            
+
             # --- Verificação do Cache Volátil ---
             if user_prompt in volatile_cache:
                 print("CACHE: Resposta encontrada no cache volátil.")
                 llm_response = volatile_cache[user_prompt]
-            
+
             # Se NÃO estava no cache (llm_response ainda é None)
             if llm_response is None:
                 # --- Verificação de Carga do Sistema ---
@@ -184,43 +184,43 @@ def route_and_respond(user_prompt):
                     cpu_cores = os.cpu_count() or 1 # Obtém o nº de núcleos (fallback para 1)
                     load_threshold = cpu_cores * 0.75 # Define o limite em 75% da capacidade
                     load_1min, _, _ = os.getloadavg() # Pega no 'load average' de 1 min
-                    
+
                     if load_1min > load_threshold:
                         print(f"AVISO: Carga do sistema alta ({load_1min:.2f} > {load_threshold:.2f}). A chamada ao Ollama foi ignorada.")
                         llm_response = "O sistema está um pouco ocupado agora. Tenta perguntar-me isso daqui a um bocado."
-                        
+
                 except Exception as e:
                     print(f"AVISO: Não foi possível verificar a carga do sistema: {e}")
                 # --------------------------------------------------
 
                 if llm_response is None:
-                    
+
                     # --- REPOSTO: Bloco 'thinking_phrases' ---
                     thinking_phrases = [
-                        "Deixa-me pensar sobre esse assunto e já te digo algo...",
-                        "Ok, deixa lá ver...",
-                        "Estou a ver... espera um segundo.",
-                        "Boa pergunta! Vou verificar os meus circuitos."
-                    ]
+                            "Deixa-me pensar sobre esse assunto e já te digo algo...",
+                            "Ok, deixa lá ver...",
+                            "Estou a ver... espera um segundo.",
+                            "Boa pergunta! Vou verificar os meus circuitos."
+                            ]
                     play_tts(random.choice(thinking_phrases))
                     # ------------------------------------------
-                    
+
                     llm_response = process_with_ollama(prompt=user_prompt)
 
                     # --- Guardar no Cache Volátil ---
                     if llm_response and "Ocorreu um erro" not in llm_response:
                         print(f"CACHE: A guardar resposta para o prompt: '{user_prompt}'")
                         volatile_cache[user_prompt] = llm_response
-        
+
         # --- Processamento da Resposta ---
-        
+
         if isinstance(llm_response, dict):
             if llm_response.get("stop_processing"):
                 return llm_response.get("response", "") # Retorna para a API, mas não fala
 
         play_tts(llm_response)
         return llm_response
-        
+
     except Exception as e:
         print(f"ERRO CRÍTICO no router de intenções: {e}")
         error_msg = f"Ocorreu um erro ao processar: {e}"
@@ -232,14 +232,14 @@ def process_user_query():
     try:
         audio_data = record_audio()
         user_prompt = transcribe_audio(audio_data)
-        
+
         print(f"Utilizador: {user_prompt}")
-        
+
         if user_prompt: # Só processa se o Whisper tiver detetado fala
             route_and_respond(user_prompt)
         else:
             print("Nenhum texto transcrito, a voltar à escuta.")
-        
+
     except Exception as e:
         print(f"ERRO CRÍTICO no pipeline de processamento de áudio: {e}")
 
@@ -297,7 +297,7 @@ def get_help():
 @app.route("/")
 def get_frontend_ui():
     """ Serve a página HTML principal do frontend """
-    
+
     # Todo o HTML e JS estão aqui. Não precisamos de ficheiros separados.
     html_content = """
     <!DOCTYPE html>
@@ -358,7 +358,7 @@ def get_frontend_ui():
             async function sendChatCommand() {
                 const prompt = chatInput.value;
                 if (!prompt) return;
-                
+
                 addToChatLog(prompt, 'user');
                 chatInput.value = '';
 
@@ -369,7 +369,7 @@ def get_frontend_ui():
                         body: JSON.stringify({ prompt: prompt })
                     });
                     const data = await response.json();
-                    
+
                     // A resposta do /comando já tem o TTS, aqui só mostramos no log
                     if (data.response) {
                         addToChatLog(data.response, 'ia');
@@ -391,7 +391,7 @@ def get_frontend_ui():
                         body: JSON.stringify({ device: device, action: action })
                     });
                     const data = await response.json();
-                    
+
                     if (data.response) {
                         addToChatLog(data.response, 'ia');
                     }
@@ -405,16 +405,16 @@ def get_frontend_ui():
                 try {
                     const response = await fetch('/get_devices');
                     const data = await response.json();
-                    
+
                     deviceListDiv.innerHTML = ''; // Limpa
-                    
+
                     for (const skillName in data.devices) {
                         const devices = data.devices[skillName];
                         if (devices.length > 0) {
                             const groupDiv = document.createElement('div');
                             groupDiv.classList.add('device-group');
                             groupDiv.innerHTML = `<h3>${skillName.replace('skill_', '')}</h3>`;
-                            
+
                             devices.forEach(device => {
                                 const onBtn = `<span class="device-btn btn-on" onclick="handleDeviceAction('${device}', 'ligar')">Ligar</span>`;
                                 const offBtn = `<span class="device-btn btn-off" onclick="handleDeviceAction('${device}', 'desligar')">Desligar</span>`;
@@ -452,16 +452,16 @@ def get_devices_list():
     """
     global SKILLS_LIST
     device_map = {}
-    
+
     # Skills que sabemos que controlam dispositivos
     DEVICE_SKILL_NAMES = ["skill_cloogy", "skill_tuya", "skill_xiaomi"]
-    
+
     for skill in SKILLS_LIST:
         skill_name = skill.get("name")
         if skill_name in DEVICE_SKILL_NAMES:
             # Os 'triggers' destas skills são os nomes dos dispositivos
             device_map[skill_name] = skill.get("triggers", [])
-            
+
     return jsonify({"status": "ok", "devices": device_map})
 
 @app.route("/device_action", methods=['POST'])
@@ -474,20 +474,20 @@ def handle_device_action():
         data = request.json
         device = data.get('device')
         action = data.get('action') # "ligar" ou "desligar"
-        
+
         if not device or not action:
             return jsonify({"status": "erro", "message": "Ação ou Dispositivo em falta"}), 400
-            
+
         # Construímos um prompt de voz simulado
         prompt = f"{action} o {device}" 
-        
+
         print(f"\n[Comando WebUI Recebido]: {prompt}")
-        
+
         # Enviamos para o mesmo router que o áudio e a API usam
         response_text = route_and_respond(prompt)
-        
+
         return jsonify({"status": "ok", "action": "comando_processado", "response": response_text})
-        
+
     except Exception as e:
         print(f"ERRO no endpoint /device_action: {e}")
         return jsonify({"status": "erro", "message": str(e)}), 500
@@ -505,18 +505,40 @@ def main_loop():
     porcupine = None
     stream = None
     try:
-        print(f"A carregar o modelo de hotword: '{config.HOTWORD_KEYWORD}' (via Porcupine)...")
+        # --- CORREÇÕES DA HOTWORD "PHANTASMA" ---
+        HOTWORD_CUSTOM_PATH = '/opt/phantasma/models/fantasma_pt_linux_v3_0_0.ppn' 
+        HOTWORD_NAME = "phantasma" 
+        
+        # 1. Encontra o caminho da biblioteca 'pvporcupine' instalada
+        porcupine_lib_dir = os.path.dirname(pvporcupine.__file__)
+        
+        # 2. Constrói o caminho para o ficheiro de modelo 'pt'
+        pt_model_path = os.path.join(
+            porcupine_lib_dir, 
+            'lib/common/porcupine_params_pt.pv' # O ficheiro que descarregámos
+        )
+        
+        if not os.path.exists(pt_model_path):
+            print(f"ERRO CRÍTICO: Não foi possível encontrar o modelo 'pt' do Porcupine em {pt_model_path}")
+            print(f"(Baseado no 'pvporcupine.__file__' em: {porcupine_lib_dir})")
+            print("Verifique se correu o comando 'wget' para descarregar o modelo.")
+            sys.exit(1)
+
+        print(f"A carregar o modelo de hotword: '{HOTWORD_NAME}' (via Porcupine)...")
+        print(f"A usar modelo de língua: {pt_model_path}") # Log
         
         porcupine = pvporcupine.create(
             access_key=config.ACCESS_KEY,
-            keywords=[config.HOTWORD_KEYWORD],
-            sensitivities=[0.3]
+            keyword_paths=[HOTWORD_CUSTOM_PATH],   
+            model_path=pt_model_path,
+            sensitivities=[0.70] # Sensibilidade alta que testámos
         )
+        # --- FIM DAS CORREÇÕES DA HOTWORD ---
         
         chunk_size = porcupine.frame_length
 
         while True:
-            print(f"\n--- A escutar pela hotword '{config.HOTWORD_KEYWORD}' (via Porcupine) ---")
+            print(f"\n--- A escutar pela hotword '{HOTWORD_NAME}' (via Porcupine) ---")
             
             stream = sd.InputStream(
                 device=config.ALSA_DEVICE_IN, 
@@ -535,21 +557,22 @@ def main_loop():
                 chunk = chunk.flatten()
                 keyword_index = porcupine.process(chunk)
                 
-                if keyword_index == 0: # 0 é o índice de "bumblebee"
-                    print(f"\n\n**** HOTWORD '{config.HOTWORD_KEYWORD}' DETETADA! ****\n")
+                if keyword_index == 0: # 0 é o índice da tua hotword "phantasma"
+                    print(f"\n\n**** HOTWORD '{HOTWORD_NAME}' DETETADA! ****\n")
                     stream.stop()
                     stream.close()
                     stream = None
                     
-                    # --- REMOVIDO: Snippet de música ---
-                    # play_random_music_snippet()
-                    # -----------------------------------
-                    
+                    # --- A TUA PERSONALIZAÇÃO (REPOSTA) ---
                     greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ao teu dispor!", "Sim?"]
                     greeting = random.choice(greetings)
-                    play_tts(greeting)
+                    play_tts(greeting) # <--- O ASSISTENTE FALA
                     
-                    process_user_query()
+                    # --- CORREÇÃO: Pausa para evitar gravar o próprio TTS ---
+                    time.sleep(0.5) # Pausa de 500ms
+                    # -----------------------------------------------------
+                    
+                    process_user_query() # <--- O ASSISTENTE COMEÇA A OUVIR
                     
                     print("Processamento concluído. A voltar à escuta...")
                     break 
@@ -569,7 +592,7 @@ def main_loop():
         sys.exit(0)
 
 if __name__ == "__main__":
-    
+
     # Define as threads globais
     if config.OLLAMA_THREADS > 0:
         os.environ['OLLAMA_NUM_THREAD'] = str(config.OLLAMA_THREADS)
@@ -602,8 +625,8 @@ if __name__ == "__main__":
     # Inicializa o Histórico de Conversa
     print("A inicializar o histórico de conversa (memória de sessão)...")
     conversation_history = [
-        {'role': 'system', 'content': config.SYSTEM_PROMPT}
-    ]
+            {'role': 'system', 'content': config.SYSTEM_PROMPT}
+            ]
 
     # Iniciar API e Loop de Voz
     api_thread = threading.Thread(target=start_api_server, daemon=True)
