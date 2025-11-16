@@ -531,7 +531,7 @@ def main_loop():
             access_key=config.ACCESS_KEY,
             keyword_paths=[HOTWORD_CUSTOM_PATH],   
             model_path=pt_model_path,
-            sensitivities=[0.70] # Sensibilidade alta que testámos
+            sensitivities=[0.60]
         )
         # --- FIM DAS CORREÇÕES DA HOTWORD ---
         
@@ -568,8 +568,6 @@ def main_loop():
                     greeting = random.choice(greetings)
                     play_tts(greeting) # <--- O ASSISTENTE FALA
                     
-                    # --- CORREÇÃO: Pausa para evitar gravar o próprio TTS ---
-                    time.sleep(0.5) # Pausa de 500ms
                     # -----------------------------------------------------
                     
                     process_user_query() # <--- O ASSISTENTE COMEÇA A OUVIR

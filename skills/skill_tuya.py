@@ -1,5 +1,6 @@
 import config
 import time
+import re
 
 try:
     import tinytuya
@@ -10,120 +11,141 @@ except ImportError:
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "contains"
-
-# --- Ações ---
-ON_TRIGGERS = ["liga", "ligar", "acende", "acender"]
-OFF_TRIGGERS = ["desliga", "desligar", "apaga", "apagar"]
+ACTIONS_ON = ["liga", "ligar", "acende", "acender"]
+ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar"]
 STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível"]
-DEBUG_TRIGGERS = ["diagnostico", "dps"] # <--- TRIGGER PARA DEBUG
-
-# --- Nomes (Nouns) ---
+DEBUG_TRIGGERS = ["diagnostico", "dps"]
 BASE_NOUNS = [
     "sensor", "luz", "lâmpada", "desumidificador", 
     "exaustor", "tomada", "ficha", 
     "quarto", "sala", "wc" 
 ]
+VERSIONS_TO_TRY = [3.3, 3.1, 3.2, 3.4, 3.5]
 
 def _get_tuya_triggers():
     """Lê os nomes dos dispositivos do config para os triggers."""
+    all_actions = ACTIONS_ON + ACTIONS_OFF + STATUS_TRIGGERS + DEBUG_TRIGGERS
+    
+    # --- ESTA É A LINHA CORRIGIDA ---
     if hasattr(config, 'TUYA_DEVICES') and isinstance(config.TUYA_DEVICES, dict):
+    # ---------------------------------
         device_nicknames = list(config.TUYA_DEVICES.keys())
-        return BASE_NOUNS + device_nicknames + DEBUG_TRIGGERS
-    return BASE_NOUNS + DEBUG_TRIGGERS
+        return BASE_NOUNS + device_nicknames + all_actions
+    return BASE_NOUNS + all_actions
 
 TRIGGERS = _get_tuya_triggers()
+
+
+def _try_connect_with_versioning(dev_id, dev_ip, dev_key):
+    """
+    Função auxiliar para tentar ligar-se a um dispositivo
+    usando múltiplas versões de protocolo.
+    
+    Retorna (objeto_tinytuya, status_obtido) ou (None, ultimo_erro, codigo_erro)
+    """
+    if 'x' in dev_ip.lower():
+        return (None, f"IP inválido ('{dev_ip}')", None)
+        
+    print(f"Skill_Tuya: A tentar ligar a {dev_id} @ {dev_ip}...")
+    
+    last_error_payload = None
+    last_error_code = None
+    
+    for version in VERSIONS_TO_TRY:
+        try:
+            d = tinytuya.Device(dev_id, dev_ip, dev_key)
+            d.set_socketTimeout(2)
+            d.set_version(version)
+            
+            print(f"Skill_Tuya: A tentar versão {version}...", end="", flush=True)
+            status = d.status()
+            
+            if 'dps' in status:
+                print(" SUCESSO!")
+                return (d, status, None)
+            else:
+                print(f" Falhou (Resposta inválida: {status})")
+                last_error_payload = status
+                last_error_code = status.get('Err')
+                
+                if last_error_code == '905':
+                    print("Skill_Tuya: Erro 905 (Device Unreachable/Key) detetado. A parar de tentar.")
+                    break # Para o loop de versões
+
+        except Exception as e:
+            print(f" Falhou (Erro de rede: {e})")
+            last_error_payload = f"Erro de Rede: {e}"
+            last_error_code = '901' # Assumimos 901 para qualquer erro de rede
+            break # Para o loop de versões
+            
+    return (None, last_error_payload, last_error_code)
 
 
 # --- Lógica Principal (Router) ---
 
 def handle(user_prompt_lower, user_prompt_full):
-    """
-    Controla dispositivos Tuya (SmartLife) localmente.
-    """
     if "tinytuya" not in globals():
         return "A skill Tuya está instalada, mas falta a biblioteca 'tinytuya'."
     if not hasattr(config, 'TUYA_DEVICES') or not config.TUYA_DEVICES:
         return None
 
-    # 1. Encontrar a Ação (Prioridade: OFF > ON > DEBUG)
-    is_off = any(action in user_prompt_lower for action in OFF_TRIGGERS)
-    is_on = any(action in user_prompt_lower for action in ON_TRIGGERS)
+    is_off = any(action in user_prompt_lower for action in ACTIONS_OFF)
+    is_on = any(action in user_prompt_lower for action in ACTIONS_ON)
     is_status = any(action in user_prompt_lower for action in STATUS_TRIGGERS)
     is_debug = any(action in user_prompt_lower for action in DEBUG_TRIGGERS)
     
     final_action = None
-    if is_off:
-        final_action = "OFF"
-    elif is_on:
-        final_action = "ON"
-    elif is_debug:
-        final_action = "DEBUG" # <--- Prioridade para DEBUG
-    elif is_status:
-        final_action = "STATUS"
+    if is_off: final_action = "OFF"
+    elif is_on: final_action = "ON"
+    elif is_debug: final_action = "DEBUG"
+    elif is_status: final_action = "STATUS"
     
-    if not final_action:
-        return None
+    if not final_action: return None
 
-    # 2. Encontrar Dispositivos Correspondentes
     matched_devices = []
-    
     for nickname, details in config.TUYA_DEVICES.items():
         if nickname in user_prompt_lower:
             matched_devices.append((nickname, details))
             
     if not matched_devices:
-        for noun in BASE_NOUNS:
-            if noun in user_prompt_lower:
-                for nickname, details in config.TUYA_DEVICES.items():
-                    if noun in nickname: 
-                         matched_devices.append((nickname, details))
-                break 
+        nouns_in_prompt = [noun for noun in BASE_NOUNS if noun in user_prompt_lower]
+        if nouns_in_prompt:
+            for nickname, details in config.TUYA_DEVICES.items():
+                if any(noun in nickname for noun in nouns_in_prompt):
+                    matched_devices.append((nickname, details))
 
-    if len(matched_devices) == 0:
-        return None 
+    if len(matched_devices) == 0: return None 
 
-    # 3. EXECUTAR AÇÃO
     
-    # --- LÓGICA DE DEBUG (Separada para evitar erros de matching) ---
     if final_action == "DEBUG":
         if len(matched_devices) != 1:
-            return "Por favor, especifica apenas um dispositivo para o diagnóstico (ex: diagnostico exaustor 1)."
-            
+            return "Por favor, especifica apenas um dispositivo para o diagnóstico."
         nickname, details = matched_devices[0]
         return _handle_debug_status(nickname, details)
-    # --- FIM LÓGICA DE DEBUG ---
-
 
     if final_action in ["ON", "OFF"]:
-        success_nicknames = []
-        failed_reports = [] 
-        action_str = final_action
+        success_nicknames, failed_reports = [], []
         
         for nickname, details in matched_devices:
-            # Determina o DPS a usar com base no nome do dispositivo
-            dps_index = 1 # Padrão para tomadas/exaustores
-            if "luz" in nickname or "lâmpada" in nickname:
-                dps_index = 20 # DPS 20 é para as luzes
-            
+            dps_index = 20 if "luz" in nickname or "lâmpada" in nickname else 1
             try:
-                _handle_switch(nickname, details, action_str, dps_index)
+                _handle_switch(nickname, details, final_action, dps_index)
                 success_nicknames.append(nickname)
             except Exception as e:
-                failed_reports.append(f"{nickname} (Erro: {e})") 
+                failed_reports.append(f"{nickname} ({e})") 
         
+        action_word = "a ligar" if final_action == "ON" else "a desligar"
         if not failed_reports:
-            action_word = "ligados" if final_action == "ON" else "desligados"
             return f"{', '.join(success_nicknames).capitalize()} {action_word}."
         elif not success_nicknames:
             return f"Falha ao executar o comando. Detalhes: {', '.join(failed_reports)}."
         else:
-            action_word = "ligados" if final_action == "ON" else "desligados"
             return f"Comando executado em {', '.join(success_nicknames)}, mas falhou em {', '.join(failed_reports)}."
 
     if final_action == "STATUS":
         if len(matched_devices) > 1:
             nomes = ", ".join([dev[0] for dev in matched_devices])
-            return f"Encontrei vários dispositivos ({nomes}). Por favor, pede o estado de um de cada vez."
+            return f"Encontrei vários dispositivos ({nomes}). Pede o estado de um de cada vez."
         
         nickname, details = matched_devices[0]
         try:
@@ -133,100 +155,83 @@ def handle(user_prompt_lower, user_prompt_full):
 
     return None
 
-# --- Processador de Debug ---
+# --- Processadores ---
+
 def _handle_debug_status(nickname, details):
     """Liga-se ao dispositivo e imprime o seu estado raw (DPSs)"""
-    try:
-        if "10.0.0.X" in details['ip']:
-             raise Exception(f"IP não configurado (ainda é 10.0.0.X)")
-             
-        # Usamos o objeto genérico Device para obter o status raw
-        d = tinytuya.Device(
-            details['id'], details['ip'], details['key']
-        )
-        d.set_version(3.3) 
-        data = d.status()
+    print(f"*** DIAGNÓSTICO {nickname.upper()} ***")
+    
+    (d, result, err_code) = _try_connect_with_versioning(
+        details['id'], details['ip'], details['key']
+    )
+    
+    print(f"OUTPUT RAW (DPSs): {result}")
+    print("************************************\n")
+
+    if not d:
+        if err_code in ['901', '905']:
+             return f"Diagnóstico: O {nickname} está incontactável. Verifique se está ligado."
+        return f"Diagnóstico: Falha ao ligar ao {nickname}. ({result})"
         
-        # Imprime o output no journalctl
-        print(f"\n*** DIAGNÓSTICO {nickname.upper()} ***")
-        print(f"OUTPUT RAW (DPSs): {data}")
-        print("************************************\n")
-        
-        if not data or 'dps' not in data:
-            return f"Diagnóstico: O {nickname} respondeu, mas o payload está vazio ou ilegível. (DPS/Key incorreta?)"
+    return f"Diagnóstico concluído. O estado RAW (DPSs) foi enviado para o log."
 
-        return f"Diagnóstico concluído. O estado RAW (DPSs) foi enviado para o log do sistema (journalctl)."
 
-    except Exception as e:
-        error_msg = f"Falha no Diagnóstico de '{nickname}' (IP: {details['ip']}). Erro: {e}"
-        print(f"ERRO skill_tuya (Debug): {error_msg}")
-        return f"Falha no Diagnóstico. Ocorreu um erro: {e}"
-
-# --- Processador de Ligar/Desligar (Sem alterações) ---
 def _handle_switch(nickname, details, action, dps_index):
-    try:
-        if "10.0.0.X" in details['ip']:
-             raise Exception(f"IP não configurado (ainda é 10.0.0.X)")
-             
-        d = tinytuya.Device(
-            details['id'], details['ip'], details['key']
-        )
-        d.set_version(3.3) 
+    """Tenta ligar/desligar um dispositivo com multi-versão"""
+    
+    (d, status, err_code) = _try_connect_with_versioning(
+        details['id'], details['ip'], details['key']
+    )
+    
+    if not d:
+        if err_code in ['901', '905']:
+            raise Exception(f"está incontactável. Verifique se está ligado.")
+        raise Exception(f"não respondeu ({status})")
 
+    try:
         value = True if action == "ON" else False
+        print(f"Skill_Tuya: A enviar set_value({dps_index}, {value})")
         d.set_value(dps_index, value, nowait=True)
-
     except Exception as e:
-        error_msg = f"Falha ao controlar '{nickname}' (IP: {details['ip']}). Erro: {e}"
-        print(f"ERRO skill_tuya (Switch): {error_msg}")
-        if "10.0.0.X" in str(e):
-            raise Exception(f"IP não configurado")
-        else:
-            raise Exception(f"não respondeu (Timeout?)")
+        raise Exception(f"falha ao dar o comando ({e})")
 
-# --- Processador de Sensores (Protocolo 3.1) ---
+
 def _handle_sensor(nickname, details, prompt):
-    try:
-        if "10.0.0.X" in details['ip']:
-             raise Exception(f"IP não configurado (ainda é 10.0.0.X)")
-             
-        d = tinytuya.Device(
-            details['id'], details['ip'], details['key']
-        )
-        d.set_version(3.1) 
-        data = d.status()
+    """Tenta ler um sensor com multi-versão"""
+    
+    (d, data, err_code) = _try_connect_with_versioning(
+        details['id'], details['ip'], details['key']
+    )
+
+    if not d:
+        if err_code in ['901', '905']:
+            return f"O {nickname} está incontactável. Verifique se está ligado."
+        return f"O {nickname} não respondeu. ({data})"
         
-        if not data or 'dps' not in data:
-            return f"O {nickname} respondeu, mas não percebi os dados."
+    if 'dps' not in data:
+         return f"O {nickname} respondeu, mas não percebi os dados. ({data})"
 
-        dps = data['dps']
-        temp_raw = dps.get('1') 
-        humid_raw = dps.get('2')
+    dps = data['dps']
+    temp_raw = dps.get('1') or dps.get('102') # DPS 1 (antigo) ou 102 (novo)
+    humid_raw = dps.get('2') or dps.get('103') # DPS 2 (antigo) ou 103 (novo)
 
-        response = f"No {nickname}: "
-        responses_found = 0
+    response = f"No {nickname}: "
+    responses_found = 0
+    
+    if temp_raw is not None and ("temperatura" in prompt or "estado" in prompt):
+        # A 'temp' dos sensores novos é 10x
+        temp = float(temp_raw) / 10.0 if temp_raw > 100 else float(temp_raw) 
+        response += f"a temperatura é {temp} graus"
+        responses_found += 1
         
-        if temp_raw is not None and ("temperatura" in prompt or "estado" in prompt):
-            temp = float(temp_raw) / 10.0
-            response += f"a temperatura é {temp} graus"
-            responses_found += 1
-            
-        if humid_raw is not None and ("humidade" in prompt or "estado" in prompt):
-            if responses_found > 0:
-                response += " e "
-            humid = int(humid_raw)
-            response += f"a humidade é {humid} por cento"
-            responses_found += 1
+    if humid_raw is not None and ("humidade" in prompt or "estado" in prompt):
+        if responses_found > 0:
+            response += " e "
+        humid = int(humid_raw)
+        response += f"a humidade é {humid} por cento"
+        responses_found += 1
 
-        if responses_found == 0:
-            return f"Não consegui ler essa informação (Temperatura/Humidade) do {nickname}. (DPSs não são 1 e 2)."
-            
-        return response + "."
-
-    except Exception as e:
-        error_msg = f"Falha ao ler '{nickname}' (IP: {details['ip']}). Erro: {e}"
-        print(f"ERRO skill_tuya (Sensor): {error_msg}")
-        if "10.0.0.X" in str(e):
-            raise Exception(f"IP não configurado")
-        else:
-            raise Exception(f"não respondeu (Timeout?)")
+    if responses_found == 0:
+        return f"Não consegui ler essa informação (Temperatura/Humidade) do {nickname}. DPSs encontrados: {dps}"
+        
+    return response + "."
