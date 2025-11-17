@@ -107,7 +107,10 @@ def handle(user_prompt_lower, user_prompt_full):
     # Pass 1: Direct matches (nickname é substring do prompt)
     direct_matches = []
     for nickname, details in config.TUYA_DEVICES.items():
-        if nickname in user_prompt_lower:
+        
+        # --- A CORREÇÃO ESTÁ AQUI ---
+        if nickname.lower() in user_prompt_lower:
+        # -----------------------------
             direct_matches.append((nickname, details))
 
     if direct_matches:
@@ -125,7 +128,7 @@ def handle(user_prompt_lower, user_prompt_full):
         if nouns_in_prompt:
             print(f"Skill_Tuya: Match directo falhou. A procurar por nouns: {nouns_in_prompt}")
             for nickname, details in config.TUYA_DEVICES.items():
-                if any(noun in nickname for noun in nouns_in_prompt):
+                if any(noun in nickname.lower() for noun in nouns_in_prompt): # (Adicionado .lower() aqui também, por segurança)
                     matched_devices.append((nickname, details))
     # --- FIM DA LÓGICA DE MATCHING ---
 
@@ -185,7 +188,6 @@ def handle(user_prompt_lower, user_prompt_full):
             return str(e) 
 
     return None
-
 # --- Processadores ---
 
 def _handle_debug_status(nickname, details):
