@@ -142,11 +142,11 @@ def process_with_ollama(prompt):
         conversation_history.pop() # Remove o 'user'
         return "Ocorreu um erro ao processar o seu pedido."
 # --- Funções "Cérebro" (Lógica Principal) ---
-
-def route_and_respond(user_prompt):
+def route_and_respond(user_prompt, speak_response=True):
     """
     Esta é a função "cérebro" central.
     Tenta executar skills; se falhar, envia para o Ollama.
+    Recebe 'speak_response' para decidir se deve falar a resposta (Voz=True, API=False).
     """
     try:
         llm_response = None
@@ -195,15 +195,16 @@ def route_and_respond(user_prompt):
 
                 if llm_response is None:
 
-                    # --- REPOSTO: Bloco 'thinking_phrases' ---
-                    thinking_phrases = [
-                            "Deixa-me pensar sobre esse assunto e já te digo algo...",
-                            "Ok, deixa lá ver...",
-                            "Estou a ver... espera um segundo.",
-                            "Boa pergunta! Vou verificar os meus circuitos."
-                            ]
-                    play_tts(random.choice(thinking_phrases))
-                    # ------------------------------------------
+                    # --- MODIFICADO: Só diz "a pensar" se for para falar ---
+                    if speak_response:
+                        thinking_phrases = [
+                                "Deixa-me pensar sobre esse assunto e já te digo algo...",
+                                "Ok, deixa lá ver...",
+                                "Estou a ver... espera um segundo.",
+                                "Boa pergunta! Vou verificar os meus circuitos."
+                                ]
+                        play_tts(random.choice(thinking_phrases))
+                    # ----------------------------------------------------
 
                     llm_response = process_with_ollama(prompt=user_prompt)
 
@@ -216,15 +217,23 @@ def route_and_respond(user_prompt):
 
         if isinstance(llm_response, dict):
             if llm_response.get("stop_processing"):
-                return llm_response.get("response", "") # Retorna para a API, mas não fala
+                # Skills como a de música já trataram do seu próprio TTS.
+                # Apenas retornamos o texto para o log/API.
+                return llm_response.get("response", "") 
 
-        play_tts(llm_response)
+        # --- MODIFICADO: Só fala a resposta final se a flag estiver ativa ---
+        if speak_response:
+            play_tts(llm_response)
+        
+        # Retorna sempre o texto (para a API poder usá-lo)
         return llm_response
 
     except Exception as e:
         print(f"ERRO CRÍTICO no router de intenções: {e}")
         error_msg = f"Ocorreu um erro ao processar: {e}"
-        play_tts(error_msg)
+        # Só fala o erro se a chamada original quisesse falar
+        if speak_response:
+            play_tts(error_msg)
         return error_msg
 
 def process_user_query():
@@ -246,6 +255,7 @@ def process_user_query():
 # --- Bloco do Servidor API (Flask) ---
 app = Flask(__name__)
 @app.route("/comando", methods=['POST'])
+@app.route("/comando", methods=['POST'])
 def handle_command():
     """ Endpoint da API para receber comandos por texto. """
     try:
@@ -253,20 +263,25 @@ def handle_command():
         prompt = data.get('prompt')
         if not prompt:
             return jsonify({"status": "erro", "message": "Prompt em falta"}), 400
+        
         print(f"\n[Comando API Recebido]: {prompt}")
+        
+        # A exceção: "diz" DEVE falar
         if prompt.lower().startswith("diz "):
             text_to_say = prompt[len("diz "):].strip()
             print(f"API: A executar TTS direto.")
             play_tts(text_to_say)
             return jsonify({"status": "ok", "action": "tts_directo", "text": text_to_say})
         else:
-            print("API: A enviar prompt para o router de intenções...")
-            response_text = route_and_respond(prompt)
+            print("API: A enviar prompt para o router (sem voz)...")
+            # --- MODIFICADO: Passa a flag speak_response=False ---
+            response_text = route_and_respond(prompt, speak_response=False)
+            # ----------------------------------------------------
             return jsonify({"status": "ok", "action": "comando_processado", "response": response_text})
+            
     except Exception as e:
         print(f"ERRO no endpoint /comando: {e}")
         return jsonify({"status": "erro", "message": str(e)}), 500
-
 @app.route("/help", methods=['GET'])
 def get_help():
     """ Endpoint da API para listar os comandos (skills) disponíveis. """
@@ -465,6 +480,7 @@ def get_devices_list():
     return jsonify({"status": "ok", "devices": device_map})
 
 @app.route("/device_action", methods=['POST'])
+@app.route("/device_action", methods=['POST'])
 def handle_device_action():
     """
     Endpoint da API para os botões (Ligar/Desligar).
@@ -481,10 +497,11 @@ def handle_device_action():
         # Construímos um prompt de voz simulado
         prompt = f"{action} o {device}" 
 
-        print(f"\n[Comando WebUI Recebido]: {prompt}")
+        print(f"\n[Comando WebUI Recebido]: {prompt} (sem voz)")
 
-        # Enviamos para o mesmo router que o áudio e a API usam
-        response_text = route_and_respond(prompt)
+        # --- MODIFICADO: Passa a flag speak_response=False ---
+        response_text = route_and_respond(prompt, speak_response=False)
+        # ----------------------------------------------------
 
         return jsonify({"status": "ok", "action": "comando_processado", "response": response_text})
 
@@ -506,8 +523,8 @@ def main_loop():
     stream = None
     try:
         # --- CORREÇÕES DA HOTWORD "PHANTASMA" ---
-        HOTWORD_CUSTOM_PATH = '/opt/phantasma/models/fantasma_pt_linux_v3_0_0.ppn' 
-        HOTWORD_NAME = "phantasma" 
+        HOTWORD_CUSTOM_PATH = '/opt/phantasma/models/olá-fantasma_pt_linux_v3_0_0.ppn' 
+        HOTWORD_NAME = "olá fantasma" 
         
         # 1. Encontra o caminho da biblioteca 'pvporcupine' instalada
         porcupine_lib_dir = os.path.dirname(pvporcupine.__file__)
@@ -531,7 +548,7 @@ def main_loop():
             access_key=config.ACCESS_KEY,
             keyword_paths=[HOTWORD_CUSTOM_PATH],   
             model_path=pt_model_path,
-            sensitivities=[0.60]
+            sensitivities=[0.40]
         )
         # --- FIM DAS CORREÇÕES DA HOTWORD ---
         
