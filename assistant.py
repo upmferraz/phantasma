@@ -10,7 +10,7 @@ import traceback
 import random
 import glob
 import importlib.util
-
+import webrtcvad
 # Imports para API e Threading
 import threading
 import logging
@@ -721,16 +721,15 @@ def start_api_server(host='0.0.0.0', port=5000):
 
 # --- BLOCO 3: Loop Principal (Ouvinte de Hotword) ---
 def main_loop():
-    """ O loop principal: ESCUTAR com Porcupine, PROCESSAR, REPETIR """
+    """ O loop principal: ESCUTAR com Porcupine + VAD (WebRTC), PROCESSAR, REPETIR """
     porcupine = None
     stream = None
     
-    # --- NOVO: Limiar de VAD ---
-    # Este é o valor que terás de afinar.
-    # Começa baixo (0.003) e vai subindo se ainda tiveres falsos positivos.
-    # Se subir demasiado, ele pode não te ouvir.
-    VAD_THRESHOLD = 0.0015
-    # -------------------------
+    # --- CONFIGURAÇÃO VAD (WebRTC) ---
+    # Nível de agressividade do VAD (0 a 3). 
+    # 3 é o mais agressivo a filtrar ruído (menos falsos positivos, mas deves falar claro).
+    # 2 é um bom equilíbrio.
+    vad = webrtcvad.Vad(3) 
     
     try:
         # --- CORREÇÕES DA HOTWORD "PHANTASMA" ---
@@ -743,30 +742,28 @@ def main_loop():
         # 2. Constrói o caminho para o ficheiro de modelo 'pt'
         pt_model_path = os.path.join(
             porcupine_lib_dir, 
-            'lib/common/porcupine_params_pt.pv' # O ficheiro que descarregámos
+            'lib/common/porcupine_params_pt.pv' 
         )
         
         if not os.path.exists(pt_model_path):
             print(f"ERRO CRÍTICO: Não foi possível encontrar o modelo 'pt' do Porcupine em {pt_model_path}")
-            print(f"(Baseado no 'pvporcupine.__file__' em: {porcupine_lib_dir})")
-            print("Verifique se correu o comando 'wget' para descarregar o modelo.")
             sys.exit(1)
 
-        print(f"A carregar o modelo de hotword: '{HOTWORD_NAME}' (via Porcupine)...")
-        print(f"A usar modelo de língua: {pt_model_path}") # Log
+        print(f"A carregar o modelo de hotword: '{HOTWORD_NAME}'...")
         
+        # --- AJUSTE DE SENSIBILIDADE ---
+        # Baixámos de 0.65 para 0.4 para reduzir ativações com a TV.
         porcupine = pvporcupine.create(
             access_key=config.ACCESS_KEY,
             keyword_paths=[HOTWORD_CUSTOM_PATH],   
             model_path=pt_model_path,
-            sensitivities=[0.65]
+            sensitivities=[0.4] 
         )
-        # --- FIM DAS CORREÇÕES DA HOTWORD ---
         
-        chunk_size = porcupine.frame_length
+        chunk_size = porcupine.frame_length # Normalmente 512
 
         while True:
-            print(f"\n--- A escutar pela hotword '{HOTWORD_NAME}' (Limiar VAD: {VAD_THRESHOLD}) ---")
+            print(f"\n--- A escutar pela hotword '{HOTWORD_NAME}' (VAD Ativo) ---")
             
             stream = sd.InputStream(
                 device=config.ALSA_DEVICE_IN, 
@@ -780,37 +777,49 @@ def main_loop():
             while True: 
                 chunk, overflowed = stream.read(chunk_size)
                 if overflowed:
-                    print("AVISO: Overflow de áudio (Input não está a ser lido a tempo)")
+                    # Ignorar overflows silenciosamente para não sujar o log, ou imprimir se crítico
+                    pass 
                 
+                # --- LÓGICA AVANÇADA DE VAD (WebRTC) ---
+                
+                # O Porcupine pede 512 amostras (32ms @ 16kHz).
+                # O WebRTC VAD só aceita 10, 20 ou 30ms. 
+                # 30ms @ 16kHz = 480 amostras.
+                # Truque: Verificamos se as primeiras 480 amostras são voz.
+                
+                try:
+                    # Converter numpy array (int16) para raw bytes
+                    # Pegamos apenas nas primeiras 480 amostras para o VAD
+                    vad_chunk = chunk[:480].tobytes()
+                    
+                    # 16000 é a sample rate
+                    is_speech = vad.is_speech(vad_chunk, 16000)
+                except Exception:
+                    # Se houver erro no buffer (tamanho incorreto), assumimos False
+                    is_speech = False
+
+                # Se NÃO for voz humana, ignoramos e poupamos CPU/Falsos Positivos
+                if not is_speech:
+                    continue 
+                
+                # ---------------------------------------
+                
+                # Se passou no VAD, verificamos a Hotword
                 chunk_flat = chunk.flatten()
-                
-                # --- NOVO: LÓGICA DO VAD GATE ---
-                # 1. Calcular a energia (RMS) do chunk
-                # (O chunk vem como int16, a função RMS trata da conversão)
-                chunk_rms = calculate_rms(chunk_flat)
-                
-                # 2. Se a energia for muito baixa, é ruído. Ignorar.
-                if chunk_rms < VAD_THRESHOLD:
-                    continue # Volta ao início do loop, espera pelo próximo chunk
-                # --------------------------------
-                
-                # 3. Se a energia for alta, processa com o Porcupine
                 keyword_index = porcupine.process(chunk_flat)
                 
-                if keyword_index == 0: # 0 é o índice da tua hotword "phantasma"
-                    print(f"\n\n**** HOTWORD '{HOTWORD_NAME}' DETETADA! **** (RMS: {chunk_rms:.4f})\n")
+                if keyword_index == 0: 
+                    print(f"\n\n**** HOTWORD '{HOTWORD_NAME}' DETETADA! ****\n")
                     stream.stop()
                     stream.close()
                     stream = None
                     
-                    # --- A TUA PERSONALIZAÇÃO (REPOSTA) ---
+                    # --- RESPOSTA ---
                     greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ao dispor!", "Sim?"]
                     greeting = random.choice(greetings)
-                    play_tts(greeting) # <--- O ASSISTENTE FALA
+                    play_tts(greeting) 
                     
-                    # -----------------------------------------------------
-                    
-                    process_user_query() # <--- O ASSISTENTE COMEÇA A OUVIR
+                    process_user_query() 
                     
                     print("Processamento concluído. A voltar à escuta...")
                     break 
