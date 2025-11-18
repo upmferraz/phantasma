@@ -6,7 +6,7 @@ Ele usa `pvporcupine` para a deteção da *hotword* ("olá fantasma"), `whisper`
 
 ## Funcionalidades
 
-* **Hotword 100% Offline:** Usa o `pvporcupine` para uma deteção de *hotword* ("olá fantasma") fiável e sem falsos positivos.
+* **Hotword 100% Offline:** Usa o `pvporcupine` para uma deteção de *hotword* ("olá fantasma") mais fiável com menos falsos positivos. Ainda assim foi aplicada uma função de VAD para verificar primeiro por atividade de voz para evitar ativações noturnas.
 * **Transcrição Local:** Utiliza o `whisper` (modelo `medium`) para transcrição de voz para texto.
 * **Cérebro Local (LLM):** Integrado com o `ollama` para usar o modelo `llama3:8b-instruct-8k`.
 * **Voz Robótica (TTS):** Usa o `piper` com efeitos do `sox` para criar a voz do assistente.

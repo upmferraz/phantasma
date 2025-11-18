@@ -709,7 +709,7 @@ def main_loop():
     # Este é o valor que terás de afinar.
     # Começa baixo (0.003) e vai subindo se ainda tiveres falsos positivos.
     # Se subir demasiado, ele pode não te ouvir.
-    VAD_THRESHOLD = 0.0015 # <--- MANTEMOS ESTE VALOR. Está bom.
+    VAD_THRESHOLD = 0.0015
     # -------------------------
     
     try:
@@ -739,7 +739,7 @@ def main_loop():
             access_key=config.ACCESS_KEY,
             keyword_paths=[HOTWORD_CUSTOM_PATH],   
             model_path=pt_model_path,
-            sensitivities=[0.65] # <--- ALTERADO DE 0.50 PARA 0.60
+            sensitivities=[0.65]
         )
         # --- FIM DAS CORREÇÕES DA HOTWORD ---
         
