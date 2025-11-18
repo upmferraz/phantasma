@@ -245,6 +245,9 @@ TUYA_DEVICES = {
         "key": "CHAVE_LOCAL_16_CHARS"
     }
 }
+### Tuya Daemon
+Este daemon serve para recolher dados do estado dos dispositivos tuya, são dados que são enviados por UDP, e recolhidos neste daemon que poderá e deverá ser lançado como um serviço. Este Daemon será essencial para recolher os dados de dispositivos como os sensores de temperatura e humidade.
+
 ## 2. Skill Xiaomi (Miio)
 
 Esta *skill* integra dispositivos Mi Home (aspiradores, Yeelight, etc.) através do protocolo **Miio**.
