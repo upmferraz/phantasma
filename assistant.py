@@ -151,6 +151,19 @@ def process_with_ollama(prompt):
         print(f"ERRO Ollama ({config.OLLAMA_MODEL_PRIMARY}): {e}")
         conversation_history.pop() # Remove o 'user'
         return "Ocorreu um erro ao processar o seu pedido."
+
+# --- FUNÇÃO NOVA (VAD RMS) ---
+def calculate_rms(audio_chunk):
+    """ Calcula o Root Mean Square de um chunk de áudio numpy. """
+    # Garante que o input é float para evitar overflow no cálculo ao quadrado
+    if audio_chunk.dtype != np.float32:
+        # Converte int16 (de -32768 a 32767) para float32 (de -1.0 a 1.0)
+        audio_chunk = audio_chunk.astype(np.float32) / 32768.0
+        
+    return np.sqrt(np.mean(audio_chunk**2))
+# --- FIM DA FUNÇÃO NOVA ---
+
+
 # --- Funções "Cérebro" (Lógica Principal) ---
 def route_and_respond(user_prompt, speak_response=True):
     """
@@ -691,6 +704,14 @@ def main_loop():
     """ O loop principal: ESCUTAR com Porcupine, PROCESSAR, REPETIR """
     porcupine = None
     stream = None
+    
+    # --- NOVO: Limiar de VAD ---
+    # Este é o valor que terás de afinar.
+    # Começa baixo (0.003) e vai subindo se ainda tiveres falsos positivos.
+    # Se subir demasiado, ele pode não te ouvir.
+    VAD_THRESHOLD = 0.0015 # <--- MANTEMOS ESTE VALOR. Está bom.
+    # -------------------------
+    
     try:
         # --- CORREÇÕES DA HOTWORD "PHANTASMA" ---
         HOTWORD_CUSTOM_PATH = '/opt/phantasma/models/olá-fantasma_pt_linux_v3_0_0.ppn' 
@@ -718,14 +739,14 @@ def main_loop():
             access_key=config.ACCESS_KEY,
             keyword_paths=[HOTWORD_CUSTOM_PATH],   
             model_path=pt_model_path,
-            sensitivities=[0.40]
+            sensitivities=[0.65] # <--- ALTERADO DE 0.50 PARA 0.60
         )
         # --- FIM DAS CORREÇÕES DA HOTWORD ---
         
         chunk_size = porcupine.frame_length
 
         while True:
-            print(f"\n--- A escutar pela hotword '{HOTWORD_NAME}' (via Porcupine) ---")
+            print(f"\n--- A escutar pela hotword '{HOTWORD_NAME}' (Limiar VAD: {VAD_THRESHOLD}) ---")
             
             stream = sd.InputStream(
                 device=config.ALSA_DEVICE_IN, 
@@ -741,17 +762,29 @@ def main_loop():
                 if overflowed:
                     print("AVISO: Overflow de áudio (Input não está a ser lido a tempo)")
                 
-                chunk = chunk.flatten()
-                keyword_index = porcupine.process(chunk)
+                chunk_flat = chunk.flatten()
+                
+                # --- NOVO: LÓGICA DO VAD GATE ---
+                # 1. Calcular a energia (RMS) do chunk
+                # (O chunk vem como int16, a função RMS trata da conversão)
+                chunk_rms = calculate_rms(chunk_flat)
+                
+                # 2. Se a energia for muito baixa, é ruído. Ignorar.
+                if chunk_rms < VAD_THRESHOLD:
+                    continue # Volta ao início do loop, espera pelo próximo chunk
+                # --------------------------------
+                
+                # 3. Se a energia for alta, processa com o Porcupine
+                keyword_index = porcupine.process(chunk_flat)
                 
                 if keyword_index == 0: # 0 é o índice da tua hotword "phantasma"
-                    print(f"\n\n**** HOTWORD '{HOTWORD_NAME}' DETETADA! ****\n")
+                    print(f"\n\n**** HOTWORD '{HOTWORD_NAME}' DETETADA! **** (RMS: {chunk_rms:.4f})\n")
                     stream.stop()
                     stream.close()
                     stream = None
                     
                     # --- A TUA PERSONALIZAÇÃO (REPOSTA) ---
-                    greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ao teu dispor!", "Sim?"]
+                    greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ao dispor!", "Sim?"]
                     greeting = random.choice(greetings)
                     play_tts(greeting) # <--- O ASSISTENTE FALA
                     
