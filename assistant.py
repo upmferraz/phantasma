@@ -36,10 +36,14 @@ def load_skills():
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             
+            raw_triggers = getattr(module, 'TRIGGERS', [])
+            triggers_lower = [t.lower() for t in raw_triggers]
+
             SKILLS_LIST.append({
                 "name": skill_name,
                 "trigger_type": getattr(module, 'TRIGGER_TYPE', 'contains'),
-                "triggers": getattr(module, 'TRIGGERS', []),
+                "triggers": raw_triggers,
+                "triggers_lower": triggers_lower,
                 "handle": module.handle,
                 "get_status": getattr(module, 'get_status_for_device', None)
             })
@@ -118,13 +122,12 @@ def api_command():
 @app.route("/device_status")
 def api_status():
     nick = request.args.get('nickname')
+    nick_lower = nick.lower()
     
     for s in SKILLS_LIST:
         if s['get_status']:
-            # --- PROTEÇÃO CONTRA FUGA DE GÁS ---
-            # Se for a skill do Shelly Gas, SÓ responde se o nome tiver "gás".
-            # Isto impede que o valor do gás apareça na Sala/Quarto.
-            if s["name"] == "skill_shellygas" and "gás" not in nick.lower():
+            # PROTEÇÃO CRÍTICA CONTRA FUGA DE GÁS
+            if s["name"] == "skill_shellygas" and "gás" not in nick_lower and "gas" not in nick_lower:
                 continue 
 
             try:
@@ -142,8 +145,6 @@ def api_action():
 @app.route("/get_devices")
 def api_devices():
     toggles = []; status = []
-    
-    # Lógica Estrita: Lê apenas do config.py
     if hasattr(config, 'TUYA_DEVICES'):
         for n in config.TUYA_DEVICES:
             if any(x in n.lower() for x in ['sensor','temperatura','humidade']): status.append(n)
@@ -155,7 +156,6 @@ def api_devices():
             if 'casa' in n.lower(): status.append(n)
             else: toggles.append(n)
     if hasattr(config, 'SHELLY_GAS_URL') and config.SHELLY_GAS_URL: status.append("Sensor de Gás")
-    
     return jsonify({"status":"ok", "devices": {"toggles": toggles, "status": status}})
 
 @app.route("/help", methods=['GET'])
@@ -169,6 +169,7 @@ def get_help():
 
 @app.route("/")
 def ui():
+    # UI Estilizada com Animações de Escrita Restauradas
     return """<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Phantasma UI</title><style>
     :root{--bg:#121212;--chat:#1e1e1e;--usr:#2d2d2d;--ia:#005a9e;--txt:#e0e0e0}
     body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt);display:flex;flex-direction:column;height:100vh;margin:0;overflow:hidden}
@@ -179,7 +180,7 @@ def ui():
     #brand-name{font-size:0.7rem;font-weight:bold;color:#666;margin-top:2px;letter-spacing:1px}
     #bar{flex:1;display:flex;align-items:center;overflow-x:auto;white-space:nowrap;height:100%;padding-left:10px;gap:10px}
     
-    /* WIDGETS */
+    /* WIDGETS & TOOLTIP */
     .dev,.sens{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;background:#222;padding:4px;border-radius:8px;min-width:60px;transition:opacity 0.3s;margin-top:5px;position:relative}
     .sens{background:#252525;border:1px solid #333;height:52px}
     .dev.active .ico{filter:grayscale(0%)}
@@ -187,10 +188,8 @@ def ui():
     .lbl,.slbl{font-size:0.65rem;color:#aaa;max-width:65px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
     .sdat{font-size:0.75rem;color:#4db6ac;font-weight:bold}
     
-    /* TOOLTIP */
     .dev:hover::after,.sens:hover::after{content:attr(title);position:absolute;top:100%;left:50%;transform:translateX(-50%);background:#000;color:#fff;padding:4px 8px;border-radius:4px;font-size:12px;white-space:nowrap;z-index:100;pointer-events:none;margin-top:5px;border:1px solid #333}
 
-    /* SWITCH */
     .sw{position:relative;display:inline-block;width:36px;height:20px}
     .sw input{opacity:0;width:0;height:0}
     .sl{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#444;transition:.4s;border-radius:34px}
@@ -208,6 +207,14 @@ def ui():
     .msg.usr{background:var(--usr);color:#fff;border-bottom-right-radius:2px}
     .msg.ia{background:var(--chat);color:#ddd;border-bottom-left-radius:2px;border:1px solid #333}
     
+    /* TYPING INDICATOR */
+    .typing-row { display: flex; width: 100%; align-items: flex-end; justify-content: flex-start; }
+    .typing-row .av { margin-left: 0; }
+    .typing{display:inline-flex;align-items:center;padding:12px 16px;background:var(--chat);border-radius:18px;border-bottom-left-radius:2px;border:1px solid #333}
+    .dot{width:6px;height:6px;margin:0 2px;background:#888;border-radius:50%;animation:bounce 1.4s infinite ease-in-out both}
+    .dot:nth-child(1){animation-delay:-0.32s}.dot:nth-child(2){animation-delay:-0.16s}
+    @keyframes bounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}
+
     #box{padding:10px;background:#181818;border-top:1px solid #333;display:flex;gap:10px}
     #in{flex:1;background:#2a2a2a;color:#fff;border:none;padding:12px;border-radius:25px;outline:none;font-size:16px}
     #btn{background:var(--ia);color:white;border:none;padding:0 20px;border-radius:25px;font-weight:bold;cursor:pointer}
@@ -222,35 +229,59 @@ def ui():
     <div id="main"><div id="log"></div><div id="box"><input id="in" placeholder="..."><button id="btn">></button></div></div>
     <script>
     const log=document.getElementById('log'),bar=document.getElementById('bar'),devs=new Set();
-    function add(t,s){const r=document.createElement('div');r.className=`row ${s}`;if(s=='ia')r.innerHTML='<div class="av">👻</div>';
-    const m=document.createElement('div');m.className=`msg ${s}`;m.innerText=t;r.appendChild(m);log.appendChild(r);log.scrollTop=log.scrollHeight}
-    async function cmd(){const i=document.getElementById('in'),v=i.value.trim();if(!v)return;add(v,'usr');i.value='';try{const r=await fetch('/comando',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:v})});const d=await r.json();if(d.response)add(d.response,'ia')}catch{add('Erro','ia')}}
+    
+    function showTyping(){if(document.getElementById('typing-row'))return;const r=document.createElement('div');r.id='typing-row';r.className='typing-row';r.innerHTML='<div class="av">👻</div><div class="typing"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';log.appendChild(r);log.scrollTop=log.scrollHeight}
+    function hideTyping(){const t=document.getElementById('typing-row');if(t)t.remove()}
+    
+    function typeText(el,text,speed=10){
+        let i=0; function t(){if(i<text.length){el.textContent+=text.charAt(i);i++;log.scrollTop=log.scrollHeight;setTimeout(t,speed)}} t();
+    }
+
+    function add(t,s){
+        hideTyping();
+        const r=document.createElement('div');r.className=`row ${s}`;
+        if(s=='ia')r.innerHTML='<div class="av">👻</div>';
+        const m=document.createElement('div');m.className=`msg ${s}`;
+        r.appendChild(m);log.appendChild(r);log.scrollTop=log.scrollHeight;
+        if(s=='ia') typeText(m,t); else m.innerText=t;
+    }
+    
+    async function cmd(){
+        const i=document.getElementById('in'),v=i.value.trim();if(!v)return;
+        add(v,'usr');i.value='';showTyping();
+        try{
+            const r=await fetch('/comando',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:v})});
+            const d=await r.json();
+            if(d.response) add(d.response,'ia'); else hideTyping();
+        }catch{hideTyping();add('Erro','ia')}
+    }
     document.getElementById('btn').onclick=cmd;document.getElementById('in').onkeypress=e=>{if(e.key=='Enter')cmd()};
     
-    // --- EMOJIS CORRETOS ---
     function ico(n){
         n=n.toLowerCase();
         if(n.includes('aspirador')||n.includes('robot'))return'🤖';
         if(n.includes('luz')||n.includes('candeeiro')||n.includes('abajur')||n.includes('lâmpada'))return'💡';
         if(n.includes('exaustor')||n.includes('ventoinha'))return'💨';
-        if(n.includes('desumidificador'))return'💧';
+        if(n.includes('desumidificador')||n.includes('humidade'))return'💧';
         if(n.includes('gás')||n.includes('incêndio')||n.includes('fumo'))return'🔥';
         if(n.includes('tomada')||n.includes('ficha')||n.includes('forno'))return'⚡';
         return'⚡';
     }
     
-    function clean(n) { return n.replace(/(sensor|luz|candeeiro|exaustor|desumidificador|alarme|tomada)( de| da| do)?/gi, "").trim().substring(0,12); }
+    function clean(n) { return n.replace(/(sensor|luz|candeeiro|exaustor|desumidificador|alarme|tomada)( de| da| do)?/gi,"").trim().substring(0,12); }
 
     function w(d,s){
         const e=document.createElement('div');e.id='d-'+d.replace(/[^a-z0-9]/gi,''); e.title=d;
+        e.setAttribute('data-title', d);
+        
         if(s){e.className='sens';e.innerHTML=`<span class="sdat">...</span><span class="slbl">${clean(d)}</span>`}
         else{e.className='dev';e.innerHTML=`<span class="ico">${ico(d)}</span><label class="sw"><input type="checkbox" disabled><div class="sl"></div></label><span class="lbl">${clean(d)}</span>`;
-        e.querySelector('input').onchange=function(){fetch('/device_action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:d,action:this.checked?'liga':'desligar'})})}}
+        e.querySelector('input').onchange=function(){fetch('/device_action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:d,action:this.checked?'liga':'desliga'})})}}
         bar.appendChild(e);devs.add({n:d,s:s,id:e.id});upd(d,s,e.id)}
     
     async function upd(n,s,id){const el=document.getElementById(id);if(!el)return;try{const r=await fetch(`/device_status?nickname=${encodeURIComponent(n)}`);const d=await r.json();
     if(d.state=='unreachable'){el.style.opacity=0.4;if(s)el.querySelector('.sdat').innerText='?';return}el.style.opacity=1;
-    if(s){let t='';const v=el.querySelector('.sdat');
+    if(s){let t='';const v = el.querySelector('.sdat');
     if(d.power_w!==undefined){t=Math.round(d.power_w)+'W';v.style.color='#ffb74d'}
     else if(d.temperature!==undefined){t=Math.round(d.temperature)+'°';v.style.color='#4db6ac'}
     else if(d.ppm!==undefined){t=d.ppm+' ppm';v.style.color=(d.status!='normal'&&d.status!='unknown')?'#ff5252':'#4db6ac'}
