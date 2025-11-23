@@ -231,20 +231,38 @@ def api_action():
     d = request.json
     return jsonify({"status":"ok", "response": route_and_respond(f"{d.get('action')} o {d.get('device')}", False)})
 
+# assistant.py (Substituir a função api_devices)
+
 @app.route("/get_devices")
 def api_devices():
     toggles = []; status = []
-    if hasattr(config, 'TUYA_DEVICES'):
-        for n in config.TUYA_DEVICES:
-            if any(x in n.lower() for x in ['sensor','temperatura','humidade']): status.append(n)
-            else: toggles.append(n)
-    if hasattr(config, 'MIIO_DEVICES'):
-        for n in config.MIIO_DEVICES: toggles.append(n)
-    if hasattr(config, 'CLOOGY_DEVICES'):
-        for n in config.CLOOGY_DEVICES:
-            if 'casa' in n.lower(): status.append(n)
-            else: toggles.append(n)
+    
+    # Helper para obter as chaves de um dicionário de forma segura
+    def get_device_keys(attr):
+        if hasattr(config, attr) and isinstance(getattr(config, attr), dict):
+            return list(getattr(config, attr).keys())
+        return []
+
+    # 1. TUYA
+    for n in get_device_keys('TUYA_DEVICES'):
+        if any(x in n.lower() for x in ['sensor','temperatura','humidade']): status.append(n)
+        else: toggles.append(n)
+        
+    # 2. MIIO (Xiaomi)
+    for n in get_device_keys('MIIO_DEVICES'): toggles.append(n)
+        
+    # 3. CLOOGY
+    for n in get_device_keys('CLOOGY_DEVICES'):
+        if 'casa' in n.lower(): status.append(n)
+        else: toggles.append(n)
+        
+    # 4. EWELINK (NOVO: Adiciona dispositivos Ewelink aos toggles)
+    for n in get_device_keys('EWELINK_DEVICES'): 
+        toggles.append(n)
+        
+    # 5. SHELLY GAS (Status Only)
     if hasattr(config, 'SHELLY_GAS_URL') and config.SHELLY_GAS_URL: status.append("Sensor de Gás")
+    
     return jsonify({"status":"ok", "devices": {"toggles": toggles, "status": status}})
 
 # assistant.py (Substituir a função get_help)
@@ -592,51 +610,61 @@ def ui():
             // === FUNÇÕES DE ATUALIZAÇÃO (RODAM NO LOOP DE INTERVALO) ===
             // ====================================================================
 
-            async function fetchDeviceStatus(item) {
+           async function fetchDeviceStatus(item) {
                 const { name, element, input, label } = item;
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
 
-                    // 1. ATUALIZAÇÃO DE ESTADO ON/OFF (Com cheque de flicker)
+                    // 1. ATUALIZAÇÃO DE ESTADO ON/OFF
                     const newStateIsOn = data.state === 'on';
-                    const newPowerW = data.power_w;
+                    
+                    // --- CORREÇÃO: Forçar leitura de power_w se existir ---
+                    let newPowerW = data.power_w;
+                    
+                    // Normaliza: se vier como string ou null, trata
+                    if (newPowerW === undefined || newPowerW === null) newPowerW = 0;
+                    else newPowerW = parseFloat(newPowerW);
 
                     if (element.dataset.state !== data.state) {
-                         // Só atualiza o DOM se o estado lógico mudou
                         input.checked = newStateIsOn;
                         if (newStateIsOn) element.classList.add('active'); else element.classList.remove('active');
                         element.dataset.state = data.state;
                     }
                     
-                    // 2. ATUALIZAÇÃO DE OPACIDADE (Com cheque de flicker)
+                    // 2. OPACIDADE
                     const newOpacity = data.state === 'unreachable' ? 0.3 : 1.0;
                     if (parseFloat(element.style.opacity) !== newOpacity) element.style.opacity = newOpacity;
                     
                     input.disabled = false; element.classList.add('loaded');
                     
-                    // 3. ATUALIZAÇÃO DE WATTS (Com cheque de flicker no texto)
-                    if (newPowerW !== undefined) {
-                        const newText = `${Math.round(newPowerW)}W`;
+                    // 3. ATUALIZAÇÃO DE WATTS (LÓGICA MELHORADA)
+                    // Se tiver consumo (> 0.5W para filtrar ruído) OU se for explicitamente um device de energia
+                    if (newPowerW > 0.5) {
+                        const newText = `${Math.round(newPowerW)} W`;
+                        
+                        // Só atualiza o DOM se o texto mudou (evita flicker)
                         if (label.innerText !== newText) {
                             label.innerText = newText;
-                            label.style.color = "#ffb74d"; 
+                            label.style.color = "#ffb74d"; // Laranja
                             label.style.fontWeight = "bold";
                             label.title = `Consumo: ${newPowerW}W`;
                         }
                     } else {
-                        // Restaura para o texto original se estava em modo Watts e agora não está
-                        if (label.style.color === "rgb(255, 183, 77)") { 
-                            label.innerText = name.split(' ').pop().substring(0,9);
+                        // REVERT: Se o consumo for 0, volta a mostrar o NOME do dispositivo
+                        const originalName = name.split(' ').pop().substring(0,9);
+                        
+                        if (label.innerText !== originalName && label.innerText.includes('W')) {
+                            label.innerText = originalName;
                             label.style.color = "#aaa";
                             label.style.fontWeight = "normal";
+                            label.title = name;
                         }
                     }
                 } catch (e) { 
                     if (element.style.opacity !== '0.3') element.style.opacity = 0.3;
                 }
-            }
-            
+            } 
             async function fetchSensorStatus(item) {
                 const { name, element, dataSpan } = item;
                 try {

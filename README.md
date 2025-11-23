@@ -13,10 +13,10 @@ Ele usa `pvporcupine` para a deteção da *hotword* ("olá fantasma"), `whisper`
 * **API e CLI:** Além da voz, pode ser controlado por uma API REST (Flask) e um *script* de CLI (`phantasma-cli.sh`).
 * **Sistema de Skills Modular:** As funcionalidades (Cálculo, Meteorologia, Música, Memória) são carregadas dinamicamente a partir da pasta `skills/`.
 * **RAG (Retrieval-Augmented Generation):**
-    * **Memória de Longo Prazo:** Pode memorizar factos ("Bumblebee, memoriza isto...") numa base de dados SQLite.
+    * **Memória de Longo Prazo:** Pode memorizar factos ("phantasma, memoriza isto...") numa base de dados SQLite.
     * **Pesquisa Web:** Enriquece as respostas do Ollama com resultados de pesquisa em tempo real, usando a tua instância local do **SearxNG**.
 * **Feedback de Áudio:** Toca um *snippet* de música aleatório e uma saudação quando a *hotword* é detetada, para que saibas quando começar a falar.
-* **Personalidade:** O *prompt* do sistema está configurado para a personalidade do Bumblebee, com regras para evitar *bugs* de TTS ("WOOHOO") e manter as preferências do utilizador (vegan).
+* **Personalidade:** O *prompt* do sistema está configurado para a personalidade do phantasma, com regras para evitar *bugs* de TTS ("WOOHOO") e manter as preferências do utilizador (vegan).
 
 ---
 
@@ -24,7 +24,7 @@ Ele usa `pvporcupine` para a deteção da *hotword* ("olá fantasma"), `whisper`
 
 | Componente | Tecnologia Utilizada | Propósito |
 | :--- | :--- | :--- |
-| **Hotword** | `pvporcupine` (Picovoice) | Deteção "Bumblebee" offline. |
+| **Hotword** | `pvporcupine` (Picovoice) | Deteção "pHantasma" offline. |
 | **STT (Voz->Texto)** | `openai-whisper` (Medium) | Transcrição local. |
 | **LLM (Cérebro)** | `ollama` (Llama3 8K) | Processamento de linguagem. |
 | **TTS (Texto->Voz)** | `piper` + `sox` | Geração de voz. |
@@ -153,8 +153,8 @@ journalctl -u phantasma -f
 
 ### 1. Comandos de Voz
 
-1.  Diz a *hotword*: **"Bumblebee"**.
-2.  Espera pelo *snippet* de música e pela saudação (ex: "Estou a postos!").
+1.  Diz a *hotword*: **"Fantasma"**.
+2.  Espera pela reposta).
 3.  Faz o teu pedido (ex: "como vai estar o tempo amanhã?", "memoriza que o meu gato se chama Bimby", "põe música").
 
 ### 2. Comandos via CLI (`phantasma-cli.sh`)
