@@ -1,151 +1,181 @@
 import re
 import httpx
+import unicodedata
+import config  
 
+# --- Configuração da Skill ---
 TRIGGER_TYPE = "contains"
 TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "qualidade do ar"]
 
-def _get_aqi_advice(aqi_value):
-    """ Retorna (descrição, conselho) baseado no índice CAQI. """
-    if aqi_value is None: 
-        return "sem dados", ""
-    
-    # Escala CAQI (Common Air Quality Index - Europe)
-    if aqi_value < 25: 
-        return "excelente", "Aproveita para abrir as janelas."
-    if aqi_value < 50: 
-        return "boa", "Podes fazer atividades ao ar livre à vontade."
-    if aqi_value < 75: 
-        return "moderada", "Se fores sensível, evita esforços prolongados na rua."
-    if aqi_value < 100: 
-        return "fraca", "É melhor reduzir as atividades intensas ao ar livre."
-    return "má", "Evita sair de casa ou fazer exercício na rua."
+# --- Caches em memória ---
+_IPMA_LOCATIONS_CACHE = {}
+_IPMA_WEATHER_TYPES_CACHE = {}
 
-def _get_uv_advice(uv_index):
-    """ Retorna (descrição, conselho) baseado no índice UV. """
+def _normalize(text):
+    """ Remove acentos e põe em minúsculas. """
     try:
-        uv = float(uv_index)
-    except (ValueError, TypeError):
-        return "desconhecido", ""
+        nfkd = unicodedata.normalize('NFKD', text)
+        return "".join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip()
+    except:
+        return text.lower().strip()
 
-    if uv <= 2:
-        return "baixo", "Não precisas de proteção extra."
-    if uv <= 5:
-        return "moderado", "Usa óculos de sol se saíres."
-    if uv <= 7:
-        return "alto", "Usa protetor solar e chapéu."
-    if uv <= 10:
-        return "muito alto", "Evita o sol direto, é perigoso."
-    return "extremo", "Não saias à rua sem proteção máxima."
+def _get_ipma_locations():
+    """ Cache de locais do IPMA. """
+    global _IPMA_LOCATIONS_CACHE
+    if _IPMA_LOCATIONS_CACHE: return _IPMA_LOCATIONS_CACHE
+    try:
+        url = "https://api.ipma.pt/open-data/distrits-islands.json"
+        resp = httpx.get(url, timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        for entry in data.get('data', []):
+            name = entry.get('local')
+            global_id = entry.get('globalIdLocal')
+            if name and global_id:
+                _IPMA_LOCATIONS_CACHE[_normalize(name)] = global_id
+        return _IPMA_LOCATIONS_CACHE
+    except Exception as e:
+        print(f"ERRO IPMA (Locations): {e}")
+        return {}
+
+def _get_weather_type_desc(type_id):
+    """ Cache de descrições do tempo do IPMA. """
+    global _IPMA_WEATHER_TYPES_CACHE
+    if not _IPMA_WEATHER_TYPES_CACHE:
+        try:
+            url = "https://api.ipma.pt/open-data/weather-type-classe.json"
+            resp = httpx.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                for entry in data.get('data', []):
+                    _IPMA_WEATHER_TYPES_CACHE[entry['idWeatherType']] = entry['descIdWeatherTypePT']
+        except: pass
+
+    fallback = {
+        1: "céu limpo", 2: "céu pouco nublado", 3: "céu parcialmente nublado",
+        4: "céu muito nublado", 5: "céu encoberto", 6: "chuva",
+        7: "aguaceiros fracos", 8: "aguaceiros fortes", 9: "chuva",
+        10: "chuva fraca", 11: "chuva forte", 16: "nevoeiro"
+    }
+    return _IPMA_WEATHER_TYPES_CACHE.get(type_id, fallback.get(type_id, "estado incerto"))
+
+def _get_uv_desc(uv):
+    if uv is None: return ""
+    if uv < 3: return "baixo"
+    if uv < 6: return "moderado"
+    if uv < 8: return "alto"
+    if uv < 11: return "muito alto"
+    return "extremo"
+
+def _get_iqair_desc(aqi_us):
+    """ Escala US AQI da IQAir. """
+    if aqi_us is None: return ""
+    if aqi_us <= 50: return "boa"
+    if aqi_us <= 100: return "moderada"
+    if aqi_us <= 150: return "insalubre para grupos sensíveis"
+    if aqi_us <= 200: return "insalubre"
+    if aqi_us <= 300: return "muito insalubre"
+    return "perigosa"
 
 def handle(user_prompt_lower, user_prompt_full):
-    """ Obtém previsão do tempo, UV e Qualidade do Ar com recomendações. """
+    """ Skill Meteorologia (IPMA + OpenMeteo UV + IQAir). """
     
-    print("A tentar obter meteorologia completa...")
+    # 1. Detetar Localização
+    target_city_norm = "porto"
+    target_id = 1131200 
     
-    weather_translations = {
-        "Sunny": "sol", # Ajustado para fluir com "e está sol"
-        "Clear": "céu limpo",
-        "Partly cloudy": "parcialmente nublado",
-        "Cloudy": "nublado",
-        "Overcast": "encoberto",
-        "Mist": "nevoeiro",
-        "Fog": "nevoeiro",
-        "Patchy rain possible": "possibilidade de aguaceiros",
-        "Patchy rain nearby": "aguaceiros por perto",
-        "Shower in vicinity": "aguaceiros por perto",
-        "Patchy light rain": "aguaceiros fracos",
-        "Light rain": "chuva fraca",
-        "Light rain shower": "aguaceiros fracos",
-        "Moderate rain": "chuva moderada",
-        "Heavy rain": "chuva forte",
-        "Heavy rain at times": "chuva forte por vezes",
-        "Moderate or heavy rain shower": "aguaceiros fortes",
-        "Thundery outbreaks possible": "possibilidade de trovoada"
-    }
-
-    location = "Porto"
     match = re.search(r'\b(no|na|em|para)\s+(?!(?:hoje|amanhã)\b)([A-Za-zÀ-ú\s]+)', user_prompt_lower)
-    
     if match:
-        location = match.group(2).strip().replace(" ", "+")
-        print(f"Localização explícita encontrada: {location}")
-    else:
-        print("Nenhuma localização explícita. A assumir 'Porto'.")
+        city_extracted = _normalize(match.group(2))
+        locations = _get_ipma_locations()
+        if city_extracted in locations:
+            target_city_norm = city_extracted
+            target_id = locations[city_extracted]
+        else:
+            print(f"IPMA: Cidade '{city_extracted}' não encontrada. A usar Porto.")
+
+    # 2. Determinar dia
+    day_index = 0
+    day_name = "hoje"
+    if "amanhã" in user_prompt_lower:
+        day_index = 1
+        day_name = "amanhã"
 
     try:
-        # 1. Obter Meteorologia (WTTR.IN)
-        url_wttr = f"https://wttr.in/{location}?format=j1"
         client = httpx.Client(timeout=10.0)
-        response_wttr = client.get(url_wttr)
-        response_wttr.raise_for_status()
-        data = response_wttr.json()
-        
-        nearest = data['nearest_area'][0]
-        location_name = nearest['areaName'][0]['value']
-        lat = nearest['latitude']
-        lon = nearest['longitude']
-        
-        display_location = "no Porto" if location_name == "Oporto" else f"em {location_name}"
 
-        # 2. Obter Qualidade do Ar (OPEN-METEO)
-        url_aqi = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=european_aqi"
-        aqi_desc, aqi_advice = "desconhecida", ""
+        # 3. Pedir Meteorologia (IPMA)
+        url_ipma = f"https://api.ipma.pt/open-data/forecast/meteorology/cities/daily/{target_id}.json"
+        resp_ipma = client.get(url_ipma)
+        resp_ipma.raise_for_status()
+        data_ipma = resp_ipma.json()
         
+        forecast = data_ipma['data'][day_index]
+        t_min = forecast.get('tMin')
+        t_max = forecast.get('tMax')
+        precip = float(forecast.get('precipitaProb', '0'))
+        w_desc = _get_weather_type_desc(forecast.get('idWeatherType')).lower()
+        lat = forecast.get('latitude')
+        lon = forecast.get('longitude')
+
+        # 4. Pedir UV (Open-Meteo) e AQI (IQAir)
+        uv_val = None
+        aqi_val = None
+        aqi_desc = ""
+
+        # A) Open-Meteo SÓ para UV
         try:
-            response_aqi = client.get(url_aqi, timeout=4.0)
-            if response_aqi.status_code == 200:
-                data_aqi = response_aqi.json()
-                aqi_val = data_aqi.get('current', {}).get('european_aqi')
-                aqi_desc, aqi_advice = _get_aqi_advice(aqi_val)
-        except Exception:
-            pass # Falha silenciosa no AQI
-        
-        # 3. Construir a Resposta
-        if "amanhã" in user_prompt_lower:
-            forecast = data['weather'][1]
-            cond_en = forecast['hourly'][4]['weatherDesc'][0]['value']
-            cond = weather_translations.get(cond_en, cond_en) 
-            max_t = forecast['maxtempC']
-            min_t = forecast['mintempC']
-            
-            uv_val = forecast.get('uvIndex', '0')
-            uv_desc, uv_advice = _get_uv_advice(uv_val)
-            
-            response_str = (
-                f"A previsão para amanhã {display_location} aponta para {cond}, "
-                f"com máxima de {max_t} e mínima de {min_t} graus. "
-                f"O índice UV será {uv_desc} ({uv_val}), portanto {uv_advice}"
-            )
-            
-            # Limpeza final se o conselho vier vazio
-            response_str = response_str.replace(" ,", ",").replace(" .", ".")
-            return response_str
-            
-        else:
-            forecast = data['weather'][0]
-            current = data['current_condition'][0]
-            
-            cond_key = current['weatherDesc'][0]['value']
-            cond = weather_translations.get(cond_key, cond_key).lower()
-            
-            temp = current['temp_C']
-            max_t = forecast['maxtempC']
-            min_t = forecast['mintempC']
-            
-            uv_val = current.get('uvIndex', '0')
-            uv_desc, uv_advice = _get_uv_advice(uv_val)
+            url_om = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=uv_index"
+            resp_om = client.get(url_om, timeout=2.0)
+            if resp_om.status_code == 200:
+                uv_val = resp_om.json().get('current', {}).get('uv_index')
+        except: pass
 
-            # Construção da frase natural
-            # Ex: "Atualmente no Porto estão 12 graus e céu limpo."
-            msg = (
-                f"Atualmente {display_location} estão {temp} graus e está {cond}. "
-                f"A qualidade do ar é {aqi_desc}. {aqi_advice} "
-                f"O índice UV está {uv_desc} ({uv_val}); {uv_advice} "
-                f"Hoje a máxima chega aos {max_t} e a mínima desce aos {min_t}."
-            )
+        # B) IQAir para Qualidade do Ar (Se tiver chave)
+        if hasattr(config, 'IQAIR_KEY') and config.IQAIR_KEY:
+            try:
+                # Usa as coordenadas do IPMA para encontrar a estação mais próxima (ex: Paranhos)
+                url_iq = f"http://api.airvisual.com/v2/nearest_city?lat={lat}&lon={lon}&key={config.IQAIR_KEY}"
+                resp_iq = client.get(url_iq, timeout=4.0)
+                if resp_iq.status_code == 200:
+                    iq_data = resp_iq.json().get('data', {})
+                    # AQI US é o padrão internacional da IQAir
+                    aqi_val = iq_data.get('current', {}).get('pollution', {}).get('aqius')
+                    aqi_desc = _get_iqair_desc(aqi_val)
+            except Exception as e:
+                print(f"Erro IQAir: {e}")
+        else:
+            if "qualidade do ar" in user_prompt_lower:
+                print("Aviso: Chave IQAir não configurada no config.py")
+
+        # 5. Construir Resposta
+        
+        # A) Pergunta rápida sobre chuva
+        wants_rain = any(x in user_prompt_lower for x in ["chover", "chuva", "molhar", "água"])
+        if wants_rain:
+            if precip >= 70: txt = f"Sim, é quase certo ({precip}%). "
+            elif precip >= 30: txt = f"Talvez, há {precip}% de hipóteses. "
+            elif precip > 0: txt = f"Pouco provável, apenas {precip}%. "
+            else: txt = "Não, não se prevê chuva. "
+            return txt + f"Em {target_city_norm.title()} espera-se {w_desc}."
+
+        # B) Resposta Geral
+        response = (
+            f"Previsão para {day_name} em {target_city_norm.title()}: "
+            f"{w_desc}, máxima {t_max}° e mínima {t_min}°."
+        )
+        if precip > 0:
+            response += f" Probabilidade de chuva: {precip}%."
+
+        if uv_val is not None:
+            desc = _get_uv_desc(uv_val)
+            response += f" Índice UV {uv_val} ({desc})."
             
-            return msg
+        if aqi_val is not None:
+            response += f" Qualidade do ar: {aqi_desc} ({aqi_val})."
+
+        return response
 
     except Exception as e:
         print(f"ERRO skill_weather: {e}")
-        return None
+        return "Não consegui aceder à meteorologia."
