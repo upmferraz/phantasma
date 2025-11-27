@@ -15,8 +15,7 @@ TRIGGERS = ["carregador", "carro", "ewelink", "tomada do carro"]
 
 ACTIONS_ON = ["liga", "ligar", "acende", "ativa", "inicia", "põe a carregar"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "desativa", "para", "pára"]
-STATUS_TRIGGERS = ["consumo", "gastar", "leitura", "quanto", "estado", "como está"]
-
+STATUS_TRIGGERS = ["consumo", "gastar", "leitura", "quanto", "estado", "como está", "a carregar", "carregar"]
 # Tenta importar a biblioteca (sem patches, usa o constants.py do disco)
 try:
     import ewelink
@@ -163,11 +162,11 @@ def get_status_for_device(nickname):
         try: ui_res["power_w"] = float(data["power"])
         except: pass
     return ui_res
-
 def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'EWELINK_DEVICES'): return None
 
     action = None
+    # Prioridade de Segurança: Verificar OFF primeiro
     if any(x in user_prompt_lower for x in ACTIONS_OFF): action = "off"
     elif any(x in user_prompt_lower for x in ACTIONS_ON): action = "on"
     elif any(x in user_prompt_lower for x in STATUS_TRIGGERS): action = "status"
@@ -193,6 +192,22 @@ def handle(user_prompt_lower, user_prompt_full):
         data = _get_cached_data(target_id)
         if not data: return f"A recolher dados do {target_nickname}..."
         
+        # --- LÓGICA NOVA: Verificar se está a carregar ---
+        if "carregar" in user_prompt_lower:
+            try:
+                power = float(data.get('power', 0))
+            except (ValueError, TypeError):
+                power = 0.0
+
+            if power > 10:
+                return f"Sim, o carro está a carregar a {power} Watts."
+            elif power < 5:
+                return f"Não, o carro não está a carregar."
+            else:
+                # Caso intermédio (entre 5 e 10W - standby do carregador?)
+                return f"O carregador está ligado mas o consumo é baixo ({power} Watts)."
+        # -------------------------------------------------
+
         parts = [f"O {target_nickname} está {data.get('state')}"]
         if data.get('power'): parts.append(f"a gastar {data['power']} Watts")
         if data.get('current'): parts.append(f"({data['current']} A)")
