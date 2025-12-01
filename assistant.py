@@ -16,6 +16,7 @@ import logging
 from flask import Flask, request, jsonify
 import pvporcupine
 import sounddevice as sd 
+import subprocess # Necessário para o aplay direto
 
 # --- NOSSOS MÓDULOS ---
 import config
@@ -25,8 +26,6 @@ from tools import search_with_searxng
 
 # --- Carregamento Dinâmico de Skills ---
 SKILLS_LIST = []
-
-# assistant.py (Função load_skills)
 
 def load_skills():
     print("A carregar skills...")
@@ -43,7 +42,7 @@ def load_skills():
 
             SKILLS_LIST.append({
                 "name": skill_name,
-                "module": module, # <-- CRÍTICO: Objeto do módulo para iniciar o daemon
+                "module": module, 
                 "trigger_type": getattr(module, 'TRIGGER_TYPE', 'contains'),
                 "triggers": raw_triggers,
                 "triggers_lower": triggers_lower,
@@ -59,6 +58,7 @@ whisper_model = None
 ollama_client = None
 conversation_history = []
 volatile_cache = {}
+GREETINGS_CACHE_DIR = os.path.join(config.BASE_DIR, "sounds/greetings")
 
 # --- IA Core ---
 def transcribe_audio(audio_data):
@@ -72,7 +72,8 @@ def transcribe_audio(audio_data):
 def process_with_ollama(prompt):
     global conversation_history
     if not prompt: return "Não percebi."
-    rag = retrieve_from_rag(prompt); web = search_with_searxng(prompt)
+    rag = retrieve_from_rag(prompt)
+    web = search_with_searxng(prompt)
     final = f"{web}\n{rag}\nPERGUNTA: {prompt}"
     conversation_history.append({'role': 'user', 'content': final})
     try:
@@ -94,10 +95,9 @@ def route_and_respond(user_prompt, speak_response=True):
         llm_response = None
         user_prompt_lower = user_prompt.lower()
 
-        # --- NOVO ROUTER DE SKILLS (usando triggers_lower) ---
+        # --- ROUTER DE SKILLS ---
         for skill in SKILLS_LIST:
             triggered = False
-            # Usa a nova lista de triggers em lowercase (populada em load_skills)
             triggers_to_check = skill.get("triggers_lower", [])
 
             if skill["trigger_type"] == "startswith":
@@ -109,75 +109,56 @@ def route_and_respond(user_prompt, speak_response=True):
 
             if triggered:
                 print(f"A ativar skill: {skill['name']}")
-                # A chamada ao handle é mantida como no original (lower, full)
                 llm_response = skill["handle"](user_prompt_lower, user_prompt)
                 if llm_response:
-                    break # Skill foi executada
-        # --- FIM DO ROUTER ---
+                    break 
 
-        # 5. FALLBACK: OLLAMA (Se nenhuma skill foi ativada)
+        # 5. FALLBACK: OLLAMA
         if llm_response is None:
-
-            # --- Verificação do Cache Volátil ---
             if user_prompt in volatile_cache:
                 print("CACHE: Resposta encontrada no cache volátil.")
                 llm_response = volatile_cache[user_prompt]
 
-            # Se NÃO estava no cache (llm_response ainda é None)
             if llm_response is None:
-                # --- Verificação de Carga do Sistema ---
                 try:
-                    cpu_cores = os.cpu_count() or 1 # Obtém o nº de núcleos (fallback para 1)
-                    load_threshold = cpu_cores * 0.75 # Define o limite em 75% da capacidade
-                    load_1min, _, _ = os.getloadavg() # Pega no 'load average' de 1 min
+                    cpu_cores = os.cpu_count() or 1
+                    load_threshold = cpu_cores * 0.75
+                    load_1min, _, _ = os.getloadavg()
 
                     if load_1min > load_threshold:
-                        print(f"AVISO: Carga do sistema alta ({load_1min:.2f} > {load_threshold:.2f}). A chamada ao Ollama foi ignorada.")
-                        llm_response = "O sistema está um pouco ocupado agora. Tenta perguntar-me isso daqui a bocado."
-
+                        print(f"AVISO: Carga alta ({load_1min:.2f}). Ollama ignorado.")
+                        llm_response = "O sistema está ocupado. Tenta mais tarde."
                 except Exception as e:
-                    print(f"AVISO: Não foi possível verificar a carga do sistema: {e}")
-                # --------------------------------------------------
+                    print(f"AVISO: Carga sistema: {e}")
 
                 if llm_response is None:
-
-                    # --- MODIFICADO: Só diz "a pensar" se for para falar ---
                     if speak_response:
                         thinking_phrases = [
-                                "Deixa-me pensar sobre esse assunto e já te digo algo...",
-                                "Ok, deixa lá ver...",
-                                "Estou a ver... espera um segundo.",
-                                "Boa pergunta! Vou verificar os meus circuitos."
+                                "Deixa-me pensar...",
+                                "Ok, deixa ver...",
+                                "Um segundo.",
+                                "A verificar."
                                 ]
                         play_tts(random.choice(thinking_phrases))
-                    # ----------------------------------------------------
 
                     llm_response = process_with_ollama(prompt=user_prompt)
 
-                    # --- Guardar no Cache Volátil ---
                     if llm_response and "Ocorreu um erro" not in llm_response:
-                        print(f"CACHE: A guardar resposta para o prompt: '{user_prompt}'")
                         volatile_cache[user_prompt] = llm_response
 
         # --- Processamento da Resposta ---
-
         if isinstance(llm_response, dict):
             if llm_response.get("stop_processing"):
-                # Skills como a de música já trataram do seu próprio TTS.
-                # Apenas retornamos o texto para o log/API.
                 return llm_response.get("response", "") 
 
-        # --- MODIFICADO: Só fala a resposta final se a flag estiver ativa ---
         if speak_response:
             play_tts(llm_response)
 
-        # Retorna sempre o texto (para a API poder usá-lo)
         return llm_response
 
     except Exception as e:
         print(f"ERRO CRÍTICO no router de intenções: {e}")
         error_msg = f"Ocorreu um erro ao processar: {e}"
-        # Só fala o erro se a chamada original quisesse falar
         if speak_response:
             play_tts(error_msg)
         return error_msg
@@ -188,6 +169,45 @@ def process_user_query():
         print(f"User: {text}")
         if text: route_and_respond(text)
     except: pass
+
+# --- OTIMIZAÇÃO: Cache de Greetings ---
+def prepare_greetings_cache():
+    """ Gera ficheiros WAV estáticos para resposta imediata à hotword. """
+    greetings = {
+        "diz_coisas": "Diz coisas!", 
+        "aqui_estou": "Aqui estou!", 
+        "diz_la": "Diz lá.", 
+        "ei": "Ei!", 
+        "sim": "Sim?"
+    }
+    
+    if not os.path.exists(GREETINGS_CACHE_DIR):
+        os.makedirs(GREETINGS_CACHE_DIR)
+        
+    print("A verificar cache de saudações...")
+    for filename, text in greetings.items():
+        wav_path = os.path.join(GREETINGS_CACHE_DIR, f"{filename}.wav")
+        if not os.path.exists(wav_path):
+            print(f"-> A gerar cache para: '{text}'")
+            try:
+                cmd = f"echo '{text}' | piper --model {config.TTS_MODEL_PATH} --output_file {wav_path}"
+                subprocess.run(cmd, shell=True, check=True)
+            except Exception as e:
+                print(f"ERRO ao gerar cache de áudio: {e}")
+
+def play_cached_greeting():
+    """ Toca um greeting aleatório diretamente via aplay (zero latência de geração). """
+    try:
+        wav_files = glob.glob(os.path.join(GREETINGS_CACHE_DIR, "*.wav"))
+        if not wav_files:
+            play_tts("Sim?") # Fallback
+            return
+
+        selected = random.choice(wav_files)
+        # Executa aplay diretamente
+        subprocess.run(['aplay', '-D', config.ALSA_DEVICE_OUT, '-q', selected], check=False)
+    except Exception as e:
+        print(f"Erro ao tocar greeting da cache: {e}")
 
 # --- API Server ---
 app = Flask(__name__)
@@ -202,27 +222,18 @@ def api_command():
 @app.route("/device_status")
 def api_status():
     nick = request.args.get('nickname')
-    if not nick: return jsonify({"state": "unknown"}), 400 # Adicionada verificação de nick
+    if not nick: return jsonify({"state": "unknown"}), 400
     nick_lower = nick.lower()
 
     for s in SKILLS_LIST:
-        # FIX CRÍTICO: Usa .get() para aceder de forma segura. 
-        # Se a chave não existir (e o load_skills estiver na versão antiga), 
-        # ou se o valor for None, status_func será Falsy.
         status_func = s.get('get_status')
-
         if status_func:
-            # PROTEÇÃO CRÍTICA CONTRA FUGA DE GÁS (mantida)
             if s["name"] == "skill_shellygas" and "gás" not in nick_lower and "gas" not in nick_lower:
                 continue 
-
             try:
-                # Se passou o if, a função existe e é chamada
                 res = status_func(nick)
                 if res and res.get('state') != 'unreachable': return jsonify(res)
-            except: 
-                # Falha silenciosamente se a skill crachar
-                pass
+            except: pass
 
     return jsonify({"state": "unreachable"})
 
@@ -231,73 +242,46 @@ def api_action():
     d = request.json
     return jsonify({"status":"ok", "response": route_and_respond(f"{d.get('action')} o {d.get('device')}", False)})
 
-# assistant.py (Substituir a função api_devices)
-
 @app.route("/get_devices")
 def api_devices():
     toggles = []; status = []
     
-    # Helper para obter as chaves de um dicionário de forma segura
     def get_device_keys(attr):
         if hasattr(config, attr) and isinstance(getattr(config, attr), dict):
             return list(getattr(config, attr).keys())
         return []
 
-    # 1. TUYA
     for n in get_device_keys('TUYA_DEVICES'):
         if any(x in n.lower() for x in ['sensor','temperatura','humidade']): status.append(n)
         else: toggles.append(n)
         
-    # 2. MIIO (Xiaomi)
     for n in get_device_keys('MIIO_DEVICES'): toggles.append(n)
-        
-    # 3. CLOOGY
     for n in get_device_keys('CLOOGY_DEVICES'):
         if 'casa' in n.lower(): status.append(n)
         else: toggles.append(n)
+    for n in get_device_keys('EWELINK_DEVICES'): toggles.append(n)
         
-    # 4. EWELINK (NOVO: Adiciona dispositivos Ewelink aos toggles)
-    for n in get_device_keys('EWELINK_DEVICES'): 
-        toggles.append(n)
-        
-    # 5. SHELLY GAS (Status Only)
     if hasattr(config, 'SHELLY_GAS_URL') and config.SHELLY_GAS_URL: status.append("Sensor de Gás")
     
     return jsonify({"status":"ok", "devices": {"toggles": toggles, "status": status}})
-
-# assistant.py (Substituir a função get_help)
 
 @app.route("/help", methods=['GET'])
 def get_help():
     try:
         commands = {}
-        # 1. Comando 'diz'
         commands["diz"] = "TTS. Ex: diz olá"
-        
-        # 2. Iterar sobre as skills e extrair triggers
         for skill in SKILLS_LIST:
             skill_name_short = skill["name"].replace("skill_", "")
-            
-            # Obtém a lista de triggers
             triggers = skill.get("triggers", [])
-            
-            # Formata os triggers para a listagem (limita a 4 para não sobrecarregar)
             if triggers:
-                # Limita a 4 triggers e junta-os
                 trigger_summary = ', '.join(triggers[:4])
-                
-                if len(triggers) > 4:
-                    trigger_summary += ', ...'
-                
+                if len(triggers) > 4: trigger_summary += ', ...'
                 description = f"Ativado por '{skill.get('trigger_type', 'N/A')}': {trigger_summary}"
             else:
-                description = "Comando ativo (sem triggers visíveis)"
-                
+                description = "Comando ativo"
             commands[skill_name_short] = description
-            
         return jsonify({"status": "ok", "commands": commands})
     except Exception as e: 
-        # Manter o bloco de exceção para garantir que o serviço não falha
         return jsonify({"status": "erro"}), 500
 
 @app.route("/")
@@ -798,15 +782,10 @@ def start_api_server(host='0.0.0.0', port=5000):
 
 def main():
     """ O loop principal: ESCUTAR com Porcupine, PROCESSAR, REPETIR """
-
-    # pv = porcupine
     pv = None
-    # pa = porcupine path
     pa = os.path.dirname(pvporcupine.__file__)
     stream = None
 
-    # Lógica de pesquisa da Hotword
-    # Lógica de pesquisa da Hotword
     try:
         models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
         ppn_files = glob.glob(os.path.join(models_dir, '*.ppn'))
@@ -819,20 +798,16 @@ def main():
 
         HOTWORD_NAME = os.path.basename(ppn_path).replace('.ppn', '')
 
-        # Cria a instância do Porcupine
         pv = pvporcupine.create(
                 access_key=config.ACCESS_KEY,
                 keyword_paths=[ppn_path],   
                 model_path=os.path.join(pa, 'lib/common/porcupine_params_pt.pv'),
                 sensitivities=[0.4] 
                 )
-
         chunk_size = pv.frame_length
 
         while True:
-            # --- Inicia Stream (dentro do loop para ser reaberto) ---
             print(f"\n--- A escutar pela hotword '{HOTWORD_NAME}' (Stream: {config.ALSA_DEVICE_IN}) ---")
-
             stream = sd.InputStream(
                     device=config.ALSA_DEVICE_IN, 
                     channels=1, 
@@ -844,26 +819,21 @@ def main():
 
             while True: 
                 chunk, overflowed = stream.read(chunk_size)
-                if overflowed:
-                    pass 
+                if overflowed: pass 
 
-                # --- NOVO: Apenas processamento do Porcupine (sem VAD) ---
                 chunk_flat = chunk.flatten()
                 keyword_index = pv.process(chunk_flat)
 
                 if keyword_index == 0: 
                     print(f"\n\n**** HOTWORD '{HOTWORD_NAME}' DETETADA! ****\n")
 
-                    # --- FIX CRÍTICO: Solta o microfone antes de gravar ---
                     stream.stop()
                     stream.close()
                     stream = None
-                    # ----------------------------------------------------
-
-                    # --- RESPOSTA ---
-                    greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ei!", "Sim?"]
-                    greeting = random.choice(greetings)
-                    play_tts(greeting) 
+                    
+                    # --- OTIMIZAÇÃO: Tocar da cache em vez de gerar TTS ---
+                    play_cached_greeting()
+                    # ------------------------------------------------------
 
                     process_user_query() 
 
@@ -885,57 +855,51 @@ def main():
         sys.exit(0)
 
 if __name__ == "__main__":
-
-    # Define as threads globais (mantido do ficheiro original)
     if config.OLLAMA_THREADS > 0:
         os.environ['OLLAMA_NUM_THREAD'] = str(config.OLLAMA_THREADS)
-        print(f"INFO: A limitar threads do Ollama a {config.OLLAMA_THREADS} (Apenas para o snap service)")
     try:
         if config.WHISPER_THREADS > 0:
             torch.set_num_threads(config.WHISPER_THREADS)
-            print(f"INFO: A limitar threads do Torch/Whisper a {config.WHISPER_THREADS}")
         if not torch.cuda.is_available():
-            print("INFO: CUDA não disponível. A forçar Whisper a correr em CPU.")
+            print("INFO: CUDA não disponível. Whisper em CPU.")
     except Exception as e:
-        print(f"AVISO: Falha ao definir threads do Torch: {e}")
+        print(f"AVISO: Threads Torch: {e}")
 
-    # Inicializa a BD
     setup_database()
-
-    # Carrega as skills dinamicamente
     load_skills()
+    
+    # --- Preparar a cache de áudio no arranque ---
+    prepare_greetings_cache()
+    # ---------------------------------------------
 
-    # Carrega os modelos pesados
     try:
-        print(f"A carregar modelos pesados (Whisper: {config.WHISPER_MODEL}, Ollama: {config.OLLAMA_MODEL_PRIMARY})...")
+        print(f"A carregar modelos (Whisper: {config.WHISPER_MODEL}, Ollama: {config.OLLAMA_MODEL_PRIMARY})...")
         whisper_model = whisper.load_model(config.WHISPER_MODEL, device="cpu")
+        
+        # --- FIX: Warmup com tipo de dados explícito (float32) ---
+        print("A aquecer o modelo Whisper...")
+        # O np.zeros padrão cria float64 (double), o que causa erro no CPU (espera float32)
+        whisper_model.transcribe(np.zeros(16000, dtype=np.float32), language='pt') 
+        # ---------------------------------------------------------
+        
         ollama_client = ollama.Client()
-        print("Modelos carregados com sucesso.")
+        print("Modelos carregados.")
     except Exception as e:
         print(f"ERRO: Falha ao carregar modelos: {e}")
         sys.exit(1)
 
-    # Inicializa o Histórico de Conversa
-    print("A inicializar o histórico de conversa (memória de sessão)...")
-    conversation_history = [
-            {'role': 'system', 'content': config.SYSTEM_PROMPT}
-            ]
-    # Iniciar API e Loop de Voz
+    print("A inicializar histórico...")
+    conversation_history = [{'role': 'system', 'content': config.SYSTEM_PROMPT}]
+    
     threading.Thread(target=start_api_server, daemon=True).start()
 
-    # --- NOVO: Executa inicialização de daemons genéricos nas skills ---
-    print("\n--- A procurar e iniciar daemons de skills em background ---")
+    print("\n--- A iniciar daemons de skills ---")
     for skill in SKILLS_LIST:
-        module = skill["module"] # <-- NOVO: Obtém o objeto do módulo
-
-        # Verifica se o módulo tem a função 'init_skill_daemon'
+        module = skill["module"]
         if hasattr(module, 'init_skill_daemon'):
             try:
-                print(f"-> A iniciar daemon para '{skill['name']}'...")
-                # Chama a função de inicialização no objeto do módulo
                 module.init_skill_daemon()
             except Exception as e:
-                print(f"ERRO CRÍTICO: Falha ao iniciar daemon de '{skill['name']}': {e}")
-    # ----------------------------------------------------------------------
+                print(f"ERRO CRÍTICO skill '{skill['name']}': {e}")
 
     main()
