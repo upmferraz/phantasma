@@ -80,7 +80,7 @@ def perform_dreaming():
 # --- Daemon de Agendamento ---
 
 def _daemon_loop():
-    """ Verifica a hora a cada 30s e dispara o sonho às 04:00 """
+    """ Verifica a hora a cada 30s e dispara o sonho às 02:30 """
     print(f"[Dream] Daemon agendado para as {DREAM_TIME}...")
     while True:
         now = datetime.datetime.now()
