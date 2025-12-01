@@ -41,13 +41,16 @@ def load_skills():
             raw_triggers = getattr(module, 'TRIGGERS', [])
             triggers_lower = [t.lower() for t in raw_triggers]
 
+            # --- FIX: handle é agora opcional (para skills como skill_ui) ---
+            handle_func = getattr(module, 'handle', None)
+
             SKILLS_LIST.append({
                 "name": skill_name,
                 "module": module, 
                 "trigger_type": getattr(module, 'TRIGGER_TYPE', 'contains'),
                 "triggers": raw_triggers,
                 "triggers_lower": triggers_lower,
-                "handle": module.handle, # Mantemos o handle para skills de voz
+                "handle": handle_func,
                 "get_status": getattr(module, 'get_status_for_device', None)
                 })
             print(f"  -> Skill '{skill_name}' carregada.")
@@ -106,6 +109,8 @@ def route_and_respond(user_prompt, speak_response=True):
         for skill in SKILLS_LIST:
             # Skills de UI ou sem triggers são ignoradas aqui
             if skill["trigger_type"] == "none": continue
+            # Segurança extra: se a skill não tiver handle, salta
+            if not skill["handle"]: continue
 
             triggered = False
             triggers_to_check = skill.get("triggers_lower", [])
@@ -256,8 +261,6 @@ def get_help():
         return jsonify({"status": "ok", "commands": commands})
     except: return jsonify({"status": "erro"}), 500
 
-# REMOVIDO: @app.route("/") def ui(): ... -> Agora está na skill_ui.py
-
 def start_api_server(host='0.0.0.0', port=5000):
     logging.getLogger('werkzeug').setLevel(logging.ERROR); app.run(host=host, port=port)
 
@@ -350,10 +353,8 @@ if __name__ == "__main__":
     print("A registar rotas web das skills...")
     for skill in SKILLS_LIST:
         module = skill["module"]
-        # Verifica se a skill tem a função register_routes
         if hasattr(module, 'register_routes'):
             try:
-                # Passa a app Flask para a skill registar a sua rota
                 module.register_routes(app)
                 print(f"  -> Rotas registadas para '{skill['name']}'")
             except Exception as e:
