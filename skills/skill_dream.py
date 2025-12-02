@@ -4,6 +4,7 @@ import datetime
 import random
 import sqlite3
 import json
+import re
 import ollama
 import config
 from tools import search_with_searxng
@@ -17,7 +18,7 @@ TRIGGERS = ["vai sonhar", "aprende algo", "desenvolve a persona", "vai estudar"]
 DREAM_TIME = "02:30" 
 
 # Configuração de Consolidação
-MEMORY_CHUNK_SIZE = 5  # Quantas memórias fundir de cada vez
+MEMORY_CHUNK_SIZE = 5
 
 def _get_recent_memories(limit=3):
     """ Lê as últimas entradas para contexto simples. """
@@ -33,73 +34,99 @@ def _get_recent_memories(limit=3):
         print(f"ERRO [Dream] Ler DB: {e}")
         return ""
 
+def _repair_malformed_json(text):
+    """
+    Tenta corrigir erros comuns de alucinação JSON do LLM.
+    Corrige especificamente: {"A" -> "B" -> "C"} para "A -> B -> C"
+    """
+    # 1. Corrige o erro das setas dentro de objetos (o teu erro específico)
+    # Procura por { "Texto" -> "Texto" -> "Texto" } e remove as chavetas
+    # Regex explicaçao: \{ *"(.*?)" *-> *"(.*?)" *-> *"(.*?)" *\}
+    pattern = r'\{\s*"(.*?)"\s*->\s*"(.*?)"\s*->\s*"(.*?)"\s*\}'
+    text = re.sub(pattern, r'"\1 -> \2 -> \3"', text)
+    
+    # 2. Corrige aspas simples para duplas (erro comum JSON)
+    # Isto é arriscado se o texto tiver apóstrofos, mas ajuda na estrutura
+    # text = text.replace("'", '"') 
+    
+    return text
+
+def _extract_json(text):
+    """ 
+    Tenta extrair um objeto JSON válido de uma string suja.
+    """
+    try:
+        # 1. Tenta encontrar o bloco JSON {...}
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        candidate = match.group(0) if match else text
+        
+        # 2. Tenta fazer parse direto
+        return json.loads(candidate)
+        
+    except json.JSONDecodeError:
+        try:
+            # 3. Se falhar, tenta REPARAR o JSON
+            fixed_text = _repair_malformed_json(candidate)
+            return json.loads(fixed_text)
+        except:
+            return None
+    except Exception:
+        return None
+
 def _consolidate_memories():
-    """
-    TAREFA DE MANUTENÇÃO:
-    Lê as últimas X memórias, funde-as numa única entrada JSON.
-    NOTA: Aqui NÃO usamos o SYSTEM_PROMPT do config para evitar forçar o Português.
-    """
-    print("🧠 [Dream] A iniciar consolidação de memória (Garbage Collection)...")
+    """ TAREFA DE MANUTENÇÃO: Funde memórias. """
+    print("🧠 [Dream] A iniciar consolidação de memória...")
     
     conn = None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
         
-        # 1. Verificar se há memórias suficientes para consolidar
         cursor.execute("SELECT id, text FROM memories ORDER BY id DESC LIMIT ?", (MEMORY_CHUNK_SIZE,))
         rows = cursor.fetchall()
         
         if len(rows) < MEMORY_CHUNK_SIZE:
-            print("🧠 [Dream] Memórias insuficientes para consolidar. A saltar.")
             return
 
-        # Separa IDs e Textos
         ids_to_delete = [r[0] for r in rows]
         texts_to_merge = [r[1] for r in rows]
         
-        # 2. Pedir ao LLM para fundir (PROMPT TÉCNICO, SEM PERSONA)
         consolidation_prompt = f"""
-        SYSTEM: You are a strict JSON Data Optimizer. You do NOT chat. You only output JSON.
+        SYSTEM: You are a JSON Data Optimizer. Output JSON ONLY.
         
-        RAW MEMORY FRAGMENTS:
+        RAW FRAGMENTS:
         {json.dumps(texts_to_merge, ensure_ascii=False)}
         
-        TASK: Merge these fragments into a SINGLE JSON object.
-        
+        TASK: Merge into a SINGLE JSON object.
         RULES:
-        1. "tags": Combine into a unique list in Portuguese (Portugal).
-        2. "facts": Combine into a unique list in ENGLISH (Subject -> Predicate -> Object).
-        3. Remove redundancy.
+        1. "tags": Unique list of strings in Portuguese.
+        2. "facts": Unique list of STRINGS in English.
+           Format: "Subject -> Predicate -> Object"
+           DO NOT use objects {{}} inside the facts array.
+        3. Valid JSON syntax (double quotes).
         
         OUTPUT FORMAT:
-        {{
-            "tags": ["TagPT1", "TagPT2"],
-            "facts": ["Subject -> verb -> Object"]
-        }}
+        {{ "tags": ["A", "B"], "facts": ["X -> Y -> Z"] }}
         """
         
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
-        # Nota: Removemos o SYSTEM_PROMPT daqui propositadamente
         resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': consolidation_prompt}])
-        merged_json = resp['message']['content'].strip()
         
-        # Limpeza básica de markdown
-        merged_json = merged_json.replace("```json", "").replace("```", "").strip()
+        merged_json_obj = _extract_json(resp['message']['content'])
         
-        # Validação básica
-        json.loads(merged_json) 
+        if not merged_json_obj:
+            print("ERRO [Dream] Consolidação falhou: JSON inválido/irrecuperável.")
+            return
+
+        merged_json_str = json.dumps(merged_json_obj, ensure_ascii=False)
         
-        # 3. Operação Atómica de BD
         placeholders = ', '.join('?' * len(ids_to_delete))
         cursor.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids_to_delete)
-        cursor.execute("INSERT INTO memories (timestamp, text) VALUES (?, ?)", (datetime.datetime.now(), merged_json))
+        cursor.execute("INSERT INTO memories (timestamp, text) VALUES (?, ?)", (datetime.datetime.now(), merged_json_str))
         
         conn.commit()
-        print(f"🧠 [Dream] Consolidação concluída! {len(ids_to_delete)} memórias fundidas em 1.")
+        print(f"🧠 [Dream] Consolidação concluída! {len(ids_to_delete)} memórias fundidas.")
         
-    except json.JSONDecodeError:
-        print("ERRO [Dream] O LLM gerou JSON inválido durante a consolidação. Abortado.")
     except Exception as e:
         print(f"ERRO [Dream] Falha na consolidação: {e}")
         if conn: conn.rollback()
@@ -107,23 +134,20 @@ def _consolidate_memories():
         if conn: conn.close()
 
 def perform_dreaming():
-    """ 
-    Ciclo de Sonho Completo.
-    """
+    """ Ciclo de Sonho Completo. """
     print("💤 [Dream] A iniciar processo de aprendizagem noturna...")
     
-    # --- FASE 1: APRENDER ---
     recent_context = _get_recent_memories()
     
-    # INTROSPEÇÃO: Aqui usamos a PERSONA (SYSTEM_PROMPT) porque queremos que o tema seja "Gótico/Vegan"
+    # 1. INTROSPEÇÃO
     introspection_prompt = f"""
     {config.SYSTEM_PROMPT}
     
     PREVIOUS MEMORIES:
     {recent_context}
     
-    TASK: Analyze your knowledge gaps. Based on your ETHICAL CORE and PERSONA, generate a SINGLE search query for a new topic.
-    OUTPUT: Write ONLY the search query string. No quotes.
+    TASK: Analyze knowledge gaps. Based on ETHICAL CORE/PERSONA, generate ONE search query.
+    OUTPUT: Search query string ONLY. No quotes.
     """
     
     try:
@@ -133,53 +157,55 @@ def perform_dreaming():
         
         print(f"💤 [Dream] Tópico: '{search_query}'")
         
+        # 2. PESQUISA
         search_results = search_with_searxng(search_query, max_results=3)
         if not search_results or len(search_results) < 10:
             return "Sonho vazio (sem dados)."
 
-        # INTERNALIZAÇÃO: Aqui usamos PROMPT TÉCNICO (sem Persona) para garantir o Inglês
+        # 3. INTERNALIZAÇÃO
+        # Prompt reforçado para evitar objetos dentro do array
         internalize_prompt = f"""
-        SYSTEM: You are a Data Extractor engine. You do NOT have a personality. You output strict JSON.
+        SYSTEM: You are a Data Extractor. Output JSON ONLY.
         
         WEB CONTEXT:
         {search_results}
         
-        TASK: Extract pure knowledge into JSON.
+        TASK: Extract knowledge to JSON.
         RULES:
-        1. CLEAN DATA: NO copyright, NO editorial notes.
-        2. TAGS: Array of keywords in PORTUGUESE (for indexing).
-        3. FACTS: Array of "Subject -> Predicate -> Object" in ENGLISH.
+        1. CLEAN DATA only.
+        2. "tags": Array of keyword strings in PORTUGUESE.
+        3. "facts": Array of STRINGS in ENGLISH.
+           Format: "Subject -> Predicate -> Object"
+           WARNING: Do NOT put curly braces {{}} inside the facts array. Use strings only.
+        4. Strict JSON syntax (double quotes).
         
         OUTPUT FORMAT:
-        {{ "tags": ["KeywordPT"], "facts": ["Subject(EN) -> verb -> Object(EN)"] }}
+        {{ "tags": ["TagPT"], "facts": ["Subject -> verb -> Object"] }}
         """
         
         resp_final = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': internalize_prompt}])
         
-        # Limpeza robusta do JSON
-        dense_thought = resp_final['message']['content'].strip()
-        if "```" in dense_thought:
-            dense_thought = dense_thought.split("```json")[-1].split("```")[0].strip()
+        json_data = _extract_json(resp_final['message']['content'])
         
-        # Validar antes de guardar
-        try:
-            json.loads(dense_thought)
-            save_to_rag(dense_thought)
-            print(f"💤 [Dream] Novo conhecimento arquivado (EN/PT).")
-        except:
-            print(f"ERRO [Dream] JSON inválido gerado: {dense_thought}")
-            return "Falha ao estruturar o sonho."
+        if not json_data:
+            print(f"ERRO [Dream] JSON Inválido. Output do modelo:\n{resp_final['message']['content']}")
+            return "Falha ao estruturar o sonho (JSON inválido)."
+            
+        dense_thought = json.dumps(json_data, ensure_ascii=False)
         
-        # --- FASE 2: CONSOLIDAR ---
+        save_to_rag(dense_thought)
+        print(f"💤 [Dream] Conhecimento arquivado: {json_data.get('tags', [])}")
+        
+        # 4. CONSOLIDAÇÃO
         _consolidate_memories()
         
-        return f"Conhecimento sobre '{search_query}' assimilado e memória otimizada."
+        return f"Conhecimento sobre '{search_query}' assimilado."
 
     except Exception as e:
-        print(f"ERRO [Dream]: {e}")
+        print(f"ERRO CRÍTICO [Dream]: {e}")
         return "Pesadelo de conexão."
 
-# --- Daemon de Agendamento ---
+# --- Daemon ---
 
 def _daemon_loop():
     print(f"[Dream] Daemon agendado para as {DREAM_TIME}...")
