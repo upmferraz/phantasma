@@ -18,7 +18,6 @@ DREAM_TIME = "02:30"
 
 # Configuração de Consolidação
 MEMORY_CHUNK_SIZE = 5  # Quantas memórias fundir de cada vez
-MIN_MEMORIES_TO_TRIGGER = 6 # Mínimo para ativar a consolidação
 
 def _get_recent_memories(limit=3):
     """ Lê as últimas entradas para contexto simples. """
@@ -37,8 +36,8 @@ def _get_recent_memories(limit=3):
 def _consolidate_memories():
     """
     TAREFA DE MANUTENÇÃO:
-    Lê as últimas X memórias, funde-as numa única entrada JSON sem duplicados,
-    remove as antigas e insere a nova.
+    Lê as últimas X memórias, funde-as numa única entrada JSON.
+    NOTA: Aqui NÃO usamos o SYSTEM_PROMPT do config para evitar forçar o Português.
     """
     print("🧠 [Dream] A iniciar consolidação de memória (Garbage Collection)...")
     
@@ -59,40 +58,39 @@ def _consolidate_memories():
         ids_to_delete = [r[0] for r in rows]
         texts_to_merge = [r[1] for r in rows]
         
-        # 2. Pedir ao LLM para fundir
+        # 2. Pedir ao LLM para fundir (PROMPT TÉCNICO, SEM PERSONA)
         consolidation_prompt = f"""
-        {config.SYSTEM_PROMPT}
+        SYSTEM: You are a strict JSON Data Optimizer. You do NOT chat. You only output JSON.
         
         RAW MEMORY FRAGMENTS:
         {json.dumps(texts_to_merge, ensure_ascii=False)}
         
-        TASK: You are a Knowledge Graph Database Optimizer.
-        These fragments contain redundant or overlapping JSON data.
-        Merge them into a SINGLE, optimized JSON object.
+        TASK: Merge these fragments into a SINGLE JSON object.
         
         RULES:
-        1. Combine "tags" arrays into one unique list (remove duplicates).
-        2. Combine "facts" arrays. If facts contradict, keep the most recent/detailed.
-        3. Remove noise. Keep only valid JSON.
+        1. "tags": Combine into a unique list in Portuguese (Portugal).
+        2. "facts": Combine into a unique list in ENGLISH (Subject -> Predicate -> Object).
+        3. Remove redundancy.
         
         OUTPUT FORMAT:
         {{
-            "tags": ["Tag1", "Tag2"],
-            "facts": ["A -> is -> B", "C -> causes -> D"]
+            "tags": ["TagPT1", "TagPT2"],
+            "facts": ["Subject -> verb -> Object"]
         }}
         """
         
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
+        # Nota: Removemos o SYSTEM_PROMPT daqui propositadamente
         resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': consolidation_prompt}])
         merged_json = resp['message']['content'].strip()
         
         # Limpeza básica de markdown
         merged_json = merged_json.replace("```json", "").replace("```", "").strip()
         
-        # Validação básica (se falhar o parse, aborta para não perder dados)
+        # Validação básica
         json.loads(merged_json) 
         
-        # 3. Operação Atómica de BD (Apagar Velhas -> Inserir Nova)
+        # 3. Operação Atómica de BD
         placeholders = ', '.join('?' * len(ids_to_delete))
         cursor.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids_to_delete)
         cursor.execute("INSERT INTO memories (timestamp, text) VALUES (?, ?)", (datetime.datetime.now(), merged_json))
@@ -110,24 +108,21 @@ def _consolidate_memories():
 
 def perform_dreaming():
     """ 
-    Ciclo de Sonho Completo:
-    1. Contexto -> Introspeção
-    2. Pesquisa
-    3. Internalização (Novo conhecimento)
-    4. Consolidação (Limpeza de memória)
+    Ciclo de Sonho Completo.
     """
     print("💤 [Dream] A iniciar processo de aprendizagem noturna...")
     
-    # --- FASE 1: APRENDER (Mantida da versão anterior) ---
+    # --- FASE 1: APRENDER ---
     recent_context = _get_recent_memories()
     
+    # INTROSPEÇÃO: Aqui usamos a PERSONA (SYSTEM_PROMPT) porque queremos que o tema seja "Gótico/Vegan"
     introspection_prompt = f"""
     {config.SYSTEM_PROMPT}
     
     PREVIOUS MEMORIES:
     {recent_context}
     
-    TASK: Analyze your knowledge gaps. Based on your ETHICAL CORE (Veganism) and PERSONA (Phantom), generate a SINGLE search query for a new topic.
+    TASK: Analyze your knowledge gaps. Based on your ETHICAL CORE and PERSONA, generate a SINGLE search query for a new topic.
     OUTPUT: Write ONLY the search query string. No quotes.
     """
     
@@ -142,8 +137,9 @@ def perform_dreaming():
         if not search_results or len(search_results) < 10:
             return "Sonho vazio (sem dados)."
 
+        # INTERNALIZAÇÃO: Aqui usamos PROMPT TÉCNICO (sem Persona) para garantir o Inglês
         internalize_prompt = f"""
-        {config.SYSTEM_PROMPT}
+        SYSTEM: You are a Data Extractor engine. You do NOT have a personality. You output strict JSON.
         
         WEB CONTEXT:
         {search_results}
@@ -151,22 +147,30 @@ def perform_dreaming():
         TASK: Extract pure knowledge into JSON.
         RULES:
         1. CLEAN DATA: NO copyright, NO editorial notes.
-        2. TAGS (PT): Array of keywords.
-        3. FACTS (EN): Array of "Subject -> Predicate -> Object".
-        4. JSON ONLY.
+        2. TAGS: Array of keywords in PORTUGUESE (for indexing).
+        3. FACTS: Array of "Subject -> Predicate -> Object" in ENGLISH.
         
         OUTPUT FORMAT:
-        {{ "tags": ["A", "B"], "facts": ["X -> y -> Z"] }}
+        {{ "tags": ["KeywordPT"], "facts": ["Subject(EN) -> verb -> Object(EN)"] }}
         """
         
         resp_final = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': internalize_prompt}])
-        dense_thought = resp_final['message']['content'].strip().replace("```json", "").replace("```", "").strip()
         
-        save_to_rag(dense_thought)
-        print(f"💤 [Dream] Novo conhecimento arquivado.")
+        # Limpeza robusta do JSON
+        dense_thought = resp_final['message']['content'].strip()
+        if "```" in dense_thought:
+            dense_thought = dense_thought.split("```json")[-1].split("```")[0].strip()
         
-        # --- FASE 2: CONSOLIDAR (Nova) ---
-        # Só corre se não tiver havido erros na fase 1
+        # Validar antes de guardar
+        try:
+            json.loads(dense_thought)
+            save_to_rag(dense_thought)
+            print(f"💤 [Dream] Novo conhecimento arquivado (EN/PT).")
+        except:
+            print(f"ERRO [Dream] JSON inválido gerado: {dense_thought}")
+            return "Falha ao estruturar o sonho."
+        
+        # --- FASE 2: CONSOLIDAR ---
         _consolidate_memories()
         
         return f"Conhecimento sobre '{search_query}' assimilado e memória otimizada."
