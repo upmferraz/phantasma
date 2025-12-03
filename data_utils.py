@@ -1,12 +1,15 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import config
 
+# --- SETUP ---
 def setup_database():
-    """ Cria a tabela 'memories' na BD se não existir. """
+    """ Cria as tabelas 'memories' e 'cache' na BD se não existirem. """
     try:
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
+        
+        # Tabela de Memórias (RAG)
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS memories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -14,12 +17,23 @@ def setup_database():
             text TEXT NOT NULL
         );
         """)
+        
+        # Tabela de Cache (Respostas Rápidas) - AS FUNÇÕES EM FALTA DEPENDEM DISTO
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cache (
+            prompt TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            timestamp DATETIME NOT NULL
+        );
+        """)
+        
         conn.commit()
         conn.close()
-        print(f"Base de dados RAG '{config.DB_PATH}' inicializada.")
+        print(f"Base de dados e Cache inicializadas em '{config.DB_PATH}'.")
     except Exception as e:
         print(f"ERRO: Falha ao inicializar a base de dados SQLite: {e}")
 
+# --- RAG (MEMÓRIA DE LONGO PRAZO) ---
 def save_to_rag(transcription_text):
     """ Guarda a transcrição do utilizador na BD RAG. """
     if not transcription_text:
@@ -40,6 +54,7 @@ def save_to_rag(transcription_text):
 def retrieve_from_rag(prompt, max_results=5):
     """
     Recupera memórias relevantes com TIMESTAMPS para dar contexto temporal.
+    Resolve o conflito 'Bimby vs Ophiuchus' dando prioridade à data.
     """
     try:
         # Filtro de palavras curtas para evitar ruído
@@ -56,7 +71,7 @@ def retrieve_from_rag(prompt, max_results=5):
             query_parts.append("text LIKE ?")
             params.append(f"%{word}%")
             
-        # CORREÇÃO: Selecionamos também o timestamp
+        # Selecionamos também o timestamp
         sql_query = f"SELECT timestamp, text FROM memories WHERE {' OR '.join(query_parts)} ORDER BY timestamp DESC LIMIT {max_results}"
         
         cursor.execute(sql_query, params)
@@ -64,28 +79,66 @@ def retrieve_from_rag(prompt, max_results=5):
         conn.close()
 
         if results:
-            # CORREÇÃO: Cabeçalho explicito para o LLM
             context_str = "MEMÓRIAS PESSOAIS DO UTILIZADOR (Ordenadas da mais recente para a antiga):\n"
             context_str += "NOTA: Se houver contradições, a informação com a DATA MAIS RECENTE é a verdadeira.\n\n"
             
             for row in results:
-                # row[0] é data, row[1] é texto
                 ts = row[0]
-                # Tenta formatar a data se for string, ou usa direta
                 try:
                     if isinstance(ts, str):
-                        # Corta os milissegundos para ficar limpo (YYYY-MM-DD HH:MM:SS)
-                        ts = ts.split('.')[0]
+                        ts = ts.split('.')[0] # Limpa milissegundos
                 except: pass
                 
                 context_str += f"- [{ts}] {row[1]}\n"
                 
-            print(f"RAG: Contexto recuperado:\n{context_str}")
+            print(f"RAG: Contexto recuperado.")
             return context_str
         else:
-            print("RAG: Nenhum contexto relevante encontrado.")
             return ""
 
     except Exception as e:
         print(f"ERRO: Falha ao recuperar da BD RAG: {e}")
         return ""
+
+# --- CACHE (RESPOSTAS RÁPIDAS) - AS FUNÇÕES QUE FALTAVAM ---
+
+def get_cached_response(prompt):
+    """ Tenta recuperar uma resposta exata da cache (válida por 24h). """
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT response, timestamp FROM cache WHERE prompt = ?", (prompt,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            response, timestamp_str = row
+            # Verifica validade (ex: 24 horas)
+            try:
+                cached_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+                if datetime.now() - cached_time < timedelta(hours=24):
+                    print("CACHE: Resposta recuperada da base de dados.")
+                    return response
+            except:
+                # Se falhar a data, usa na mesma
+                return response
+        return None
+    except Exception as e:
+        print(f"AVISO: Erro ao ler cache: {e}")
+        return None
+
+def save_cached_response(prompt, response):
+    """ Guarda uma resposta na cache para uso futuro. """
+    if not prompt or not response: return
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        cursor = conn.cursor()
+        # INSERT OR REPLACE atualiza se a chave (prompt) já existir
+        cursor.execute(
+            "INSERT OR REPLACE INTO cache (prompt, response, timestamp) VALUES (?, ?, ?)",
+            (prompt, response, datetime.now())
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"AVISO: Erro ao gravar cache: {e}")
