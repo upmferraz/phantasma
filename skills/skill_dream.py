@@ -8,6 +8,7 @@ import re
 import os
 import glob
 import ast
+import httpx
 import ollama
 import config
 from tools import search_with_searxng
@@ -17,17 +18,12 @@ from data_utils import save_to_rag, retrieve_from_rag
 TRIGGER_TYPE = "contains"
 TRIGGERS = ["vai sonhar", "aprende algo", "desenvolve a persona", "programa", "melhora o código", "sonho lúcido"]
 
-# Hora a que o assistente vai "sonhar" sozinho (formato 24h)
 DREAM_TIME = "02:30" 
 LUCID_DREAM_CHANCE = 0.3
-
-# Caminho para a skill MESTRA que vai evoluir
 AUTOGEN_SKILL_PATH = os.path.join(config.SKILLS_DIR, "skill_lucid.py")
-
-# Configuração de Consolidação
 MEMORY_CHUNK_SIZE = 5
 
-# --- Utils de Memória e JSON (Mantidos) ---
+# --- Utils de Memória e JSON ---
 
 def _get_recent_memories(limit=3):
     try:
@@ -56,6 +52,20 @@ def _extract_json(text):
         except: return None
     except: return None
 
+def _extract_python_code(text):
+    """ 
+    Extrai código Python de blocos Markdown de forma robusta. 
+    """
+    pattern = r'```(?:python)?\s*(.*?)```'
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    
+    # Fallback: Tenta limpar linhas de chat se não houver crases
+    lines = text.split('\n')
+    clean_lines = [l for l in lines if not l.strip().lower().startswith(('here is', 'sure', 'certainly', 'note:', 'this code'))]
+    return '\n'.join(clean_lines).strip()
+
 def _consolidate_memories():
     print("🧠 [Dream] A iniciar consolidação de memória...")
     try:
@@ -63,7 +73,6 @@ def _consolidate_memories():
         cursor = conn.cursor()
         cursor.execute("SELECT id, text FROM memories ORDER BY id DESC LIMIT ?", (MEMORY_CHUNK_SIZE,))
         rows = cursor.fetchall()
-        
         if len(rows) < MEMORY_CHUNK_SIZE: return
 
         ids_to_delete = [r[0] for r in rows]
@@ -78,7 +87,6 @@ def _consolidate_memories():
         TASK: Merge into SINGLE JSON. Tags (PT), Facts (EN, Strings).
         OUTPUT: {{ "tags": [], "facts": [] }}
         """
-        
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
         resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': prompt}])
         merged = _extract_json(resp['message']['content'])
@@ -95,103 +103,116 @@ def _consolidate_memories():
 
 # --- MOTOR DE SONHO LÚCIDO (CODING) ---
 
+def _ask_gemini_review(code_str):
+    if not hasattr(config, 'GEMINI_API_KEY') or not config.GEMINI_API_KEY:
+        return True, "AVISO: Gemini não configurado."
+
+    print("👾 [Lucid Dream] A pedir Code Review ao Gemini...")
+    model_name = "gemini-2.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={config.GEMINI_API_KEY}"
+    
+    prompt = f"""
+    SYSTEM: Senior Python Reviewer.
+    TASK: Check for syntax errors, infinite loops, and hallucinated imports.
+    CODE:
+    ```python
+    {code_str}
+    ```
+    OUTPUT: "VALID" or error description.
+    """
+    try:
+        resp = httpx.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15.0)
+        if resp.status_code != 200: return True, f"Gemini API Error {resp.status_code}"
+        text = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+        return ("VALID" in text.upper()), text
+    except Exception as e: return True, f"Gemini Error: {e}"
+
 def _validate_python_code(code_str):
-    """ Valida sintaxe e estrutura básica. """
+    # 1. Validação Local (Syntax)
     try:
         ast.parse(code_str)
         if "def handle" not in code_str or "TRIGGERS" not in code_str:
             return False, "Falta handle ou TRIGGERS."
-        return True, "Válido."
     except SyntaxError as e:
-        return False, f"Erro Sintaxe: {e}"
-    except Exception as e:
-        return False, f"Erro: {e}"
+        return False, f"Erro de Sintaxe Local: {e}"
+        
+    # 2. Validação Cloud (Gemini)
+    return _ask_gemini_review(code_str)
 
 def _perform_coding_dream():
-    """ 
-    O Agente Evolutivo:
-    Lê a skill existente e ADICIONA novas funções baseadas na memória.
-    """
     print("👾 [Lucid Dream] A iniciar evolução de código...")
     
-    # 1. Preparar Base de Código
-    current_code = ""
-    
-    if os.path.exists(AUTOGEN_SKILL_PATH):
+    # 1. Contexto
+    existing_skills_summary = ""
+    for f in glob.glob(os.path.join(config.SKILLS_DIR, "skill_*.py")):
+        if "skill_lucid.py" in f: continue
         try:
-            with open(AUTOGEN_SKILL_PATH, 'r') as f:
-                current_code = f.read()
+            with open(f, 'r') as file:
+                head = "".join([next(file) for _ in range(15)])
+                existing_skills_summary += f"\n--- {os.path.basename(f)} ---\n{head}...\n"
         except: pass
+
+    current_code = ""
+    if os.path.exists(AUTOGEN_SKILL_PATH):
+        try: 
+            with open(AUTOGEN_SKILL_PATH, 'r') as f: 
+                current_code = f.read()
+        except: 
+            pass
     
     if not current_code:
-        # Template inicial se o ficheiro não existir
         current_code = """
 import config
 import random
-# Initial Template
 TRIGGER_TYPE = "contains"
 TRIGGERS = ["lucid status"]
-
 def handle(user_prompt_lower, user_prompt_full):
-    return "A skill lúcida está ativa e à espera de evolução."
+    return "Skill lúcida ativa."
 """
-
-    # 2. Ler Memórias (Inspiração)
     recent_memories = _get_recent_memories(limit=10)
     
-    # 3. Prompt de Evolução Cumulativa
+    # 2. Prompt
     dev_prompt = f"""
     SYSTEM: You are an expert Python Developer for 'Phantasma'.
-    You are EVOLVING an existing file (`skill_lucid.py`).
+    Evolve `skill_lucid.py` based on MEMORY CONTEXT.
     
     CURRENT CODE:
     ```python
     {current_code}
     ```
     
-    MEMORY CONTEXT (Inspiration for NEW features):
+    MEMORY CONTEXT:
     {recent_memories}
     
-    TASK: Evolve the `skill_lucid.py` file.
-    1. **ANALYZE**: Understand existing functions. DO NOT DELETE THEM (unless redundant).
-    2. **INNOVATE**: Create a NEW helper function based on a topic in MEMORY CONTEXT (e.g., if 'Space', add `calculate_orbit()`).
-    3. **INTEGRATE**: 
-       - Update the `TRIGGERS` list to include keywords for the new feature.
-       - Update the `handle()` function to route to the new helper function based on the user prompt.
-    4. **OUTPUT**: The COMPLETE, updated Python code.
-    
-    RULES:
-    - Output ONLY Python code.
-    - Keep imports.
-    - Ensure `handle` can route to ALL features (old and new).
+    TASK:
+    1. ANALYZE existing functions. KEEP THEM.
+    2. INNOVATE: Add a NEW function based on memory.
+    3. INTEGRATE: Update `TRIGGERS` and `handle()`.
+    4. OUTPUT: COMPLETE Python code inside ```python blocks.
     """
     
     try:
-        client = ollama.Client(timeout=config.OLLAMA_TIMEOUT * 3) # Tempo extra para processar código grande
-        print("👾 [Lucid Dream] A codificar nova funcionalidade na mesma skill...")
+        client = ollama.Client(timeout=config.OLLAMA_TIMEOUT * 3)
+        print("👾 [Lucid Dream] O Ollama está a programar...")
         resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': dev_prompt}])
-        new_code = resp['message']['content'].replace("```python", "").replace("```", "").strip()
         
-        # 4. Validar
+        # FIX: Usar a função de extração robusta definida acima
+        new_code = _extract_python_code(resp['message']['content'])
+        
+        # 3. Validação
         is_valid, message = _validate_python_code(new_code)
         if not is_valid:
-            print(f"👾 [Lucid Dream] Código inválido: {message}")
-            return f"Tentei evoluir, mas falhei na sintaxe: {message}"
+            print(f"👾 [Lucid Dream] CÓDIGO INVÁLIDO:\n{new_code}\nERRO: {message}")
+            return f"Falha na validação: {message}"
         
-        # 5. Gravar (Overwrite com a versão evoluída)
-        with open(AUTOGEN_SKILL_PATH, 'w') as f:
+        # 4. Deploy
+        with open(AUTOGEN_SKILL_PATH, 'w') as f: 
             f.write(new_code)
-            
-        print(f"👾 [Lucid Dream] Sucesso! skill_lucid.py evoluída.")
         
-        # 6. Log
-        log = json.dumps({
-            "tags": ["Dev", "Evolution", "Skill Lucid"],
-            "facts": ["I added -> new function -> to skill_lucid.py", "Skill -> grew -> larger"]
-        }, ensure_ascii=False)
+        log = json.dumps({"tags": ["Dev", "Evolution"], "facts": ["Updated skill_lucid.py"]}, ensure_ascii=False)
         save_to_rag(log)
         
-        return "Evoluí o meu código interno. Adicionei novas funções à minha skill base."
+        return "Código evoluído com sucesso."
 
     except Exception as e:
         print(f"ERRO [Lucid Dream]: {e}")
@@ -202,7 +223,7 @@ def handle(user_prompt_lower, user_prompt_full):
 def _perform_web_dream():
     print("💤 [Dream] A iniciar aprendizagem Web...")
     recent_context = _get_recent_memories()
-    introspection_prompt = f"{config.SYSTEM_PROMPT}\nMEMORIES: {recent_context}\nTASK: Generate ONE search query based on interests.\nOUTPUT: Query string ONLY."
+    introspection_prompt = f"{config.SYSTEM_PROMPT}\nMEMORIES: {recent_context}\nTASK: Generate ONE search query.\nOUTPUT: Query string ONLY."
     
     try:
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
