@@ -104,7 +104,6 @@ def init_skill_daemon():
 # --- Handler ---
 
 def handle(user_prompt_lower, user_prompt_full):
-    # Lógica simplificada para garantir que funciona
     try:
         if not os.path.exists(CACHE_FILE):
             return "Ainda estou a recolher dados meteorológicos. Aguarda um momento."
@@ -121,11 +120,16 @@ def handle(user_prompt_lower, user_prompt_full):
         
         day = data['forecast'][idx]
         
-        # Resposta Base
-        resp = f"Previsão: Máxima de {day['tMax']} e mínima de {day['tMin']} graus."
+        # --- CORREÇÃO: ARREDONDAMENTO PARA INTEIROS ---
+        t_max = round(float(day.get('tMax', 0)))
+        t_min = round(float(day.get('tMin', 0)))
         
-        # Chuva
-        precip = float(day.get('precipitaProb', 0))
+        # Resposta Base
+        resp = f"Previsão: Máxima de {t_max} e mínima de {t_min} graus."
+        
+        # Chuva (converter para int para remover casa decimal)
+        precip = int(float(day.get('precipitaProb', 0)))
+        
         if precip > 50: resp += f" Leva guarda-chuva, probabilidade de chuva é {precip}%."
         elif precip > 0: resp += f" Possibilidade de chuva ({precip}%)."
         
