@@ -14,6 +14,7 @@ import webrtcvad
 import threading
 import logging
 import concurrent.futures
+import re  # <--- NOVO: Necessário para as substituições fonéticas
 from flask import Flask, request, jsonify
 import pvporcupine
 import sounddevice as sd 
@@ -24,6 +25,20 @@ import config
 from audio_utils import *
 from data_utils import setup_database, retrieve_from_rag, get_cached_response, save_cached_response
 from tools import search_with_searxng
+
+# --- LISTA DE ALUCINAÇÕES CONHECIDAS DO WHISPER ---
+WHISPER_HALLUCINATIONS = [
+    "Mais sobre isso",
+    "Mais sobre isso.",
+    "Obrigado.",
+    "Obrigado",
+    "Sous-titres réalisés par",
+    "Amara.org",
+    "MBC",
+    "S.A.",
+    ".",
+    "?"
+]
 
 # --- Carregamento Dinâmico de Skills ---
 SKILLS_LIST = []
@@ -41,7 +56,7 @@ def load_skills():
             raw_triggers = getattr(module, 'TRIGGERS', [])
             triggers_lower = [t.lower() for t in raw_triggers]
 
-            # --- FIX: handle é agora opcional (para skills como skill_ui) ---
+            # Handle é opcional
             handle_func = getattr(module, 'handle', None)
 
             SKILLS_LIST.append({
@@ -68,9 +83,38 @@ def transcribe_audio(audio_data):
     if audio_data.size == 0: return ""
     print(f"A transcrever (Modelo: {config.WHISPER_MODEL})...")
     try:
-        res = whisper_model.transcribe(audio_data, language='pt', fp16=False, initial_prompt=config.WHISPER_INITIAL_PROMPT, no_speech_threshold=0.6)
-        return res['text'].strip()
-    except Exception as e: print(f"Erro transcrição: {e}"); return ""
+        # Ajustes para reduzir alucinações: no_speech_threshold mais alto
+        res = whisper_model.transcribe(
+            audio_data, 
+            language='pt', 
+            fp16=False, 
+            initial_prompt=config.WHISPER_INITIAL_PROMPT, 
+            no_speech_threshold=0.7,  # Aumentado para ignorar silêncio melhor
+            logprob_threshold=-1.0    # Ignora transições com baixa confiança
+        )
+        text = res['text'].strip()
+        
+        # --- FILTRO DE ALUCINAÇÕES ---
+        # Se o texto for igual a uma alucinação conhecida, descartamos
+        if text in WHISPER_HALLUCINATIONS or text.startswith("Sous-titres"):
+            print(f"ALERTA: Alucinação do Whisper detetada e ignorada: '{text}'")
+            return ""
+
+        # --- CORREÇÕES FONÉTICAS (DO CONFIG) ---
+        # Aplica as correções definidas no config.py (ex: "liga-nos" -> "liga a luz")
+        if hasattr(config, 'PHONETIC_FIXES') and text:
+            for mistake, correction in config.PHONETIC_FIXES.items():
+                # Usa regex case-insensitive para substituir
+                if mistake.lower() in text.lower():
+                    # Substituição simples preservando o resto da frase
+                    pattern = re.compile(re.escape(mistake), re.IGNORECASE)
+                    text = pattern.sub(correction, text)
+                    print(f"FIX: '{mistake}' corrigido para '{correction}'")
+            
+        return text
+    except Exception as e: 
+        print(f"Erro transcrição: {e}")
+        return ""
 
 def process_with_ollama(prompt):
     global conversation_history
@@ -111,9 +155,7 @@ def route_and_respond(user_prompt, speak_response=True):
 
         # 1. ROUTER DE SKILLS
         for skill in SKILLS_LIST:
-            # Skills de UI ou sem triggers são ignoradas aqui
             if skill["trigger_type"] == "none": continue
-            # Segurança extra: se a skill não tiver handle, salta
             if not skill["handle"]: continue
 
             triggered = False
@@ -141,6 +183,7 @@ def route_and_respond(user_prompt, speak_response=True):
                 conversation_history.append({'role': 'assistant', 'content': cached_text})
 
             if llm_response is None:
+                # Verificação de Carga
                 try:
                     cpu_cores = os.cpu_count() or 1
                     load_threshold = cpu_cores * 0.75
@@ -153,8 +196,8 @@ def route_and_respond(user_prompt, speak_response=True):
                 if llm_response is None:
                     if speak_response:
                         thinking_phrases = ["Deixa-me pensar...", "Ok, deixa ver...", "Um segundo.", "A verificar."]
-                        # Frases fixas continuam a usar a cache (use_cache=True por defeito)
-                        play_tts(random.choice(thinking_phrases))
+                        # Cache ON para frases fixas
+                        play_tts(random.choice(thinking_phrases), use_cache=True)
 
                     llm_response = process_with_ollama(prompt=user_prompt)
 
@@ -168,7 +211,7 @@ def route_and_respond(user_prompt, speak_response=True):
             llm_response = llm_response.get("response", str(llm_response))
 
         if speak_response:
-            # --- MODIFICAÇÃO: Não usar cache para a resposta dinâmica do LLM/Skill ---
+            # Cache OFF para respostas dinâmicas (evita encher o disco com lixo)
             play_tts(llm_response, use_cache=False)
 
         return llm_response
@@ -176,15 +219,18 @@ def route_and_respond(user_prompt, speak_response=True):
     except Exception as e:
         print(f"ERRO CRÍTICO no router de intenções: {e}")
         error_msg = f"Ocorreu um erro ao processar: {e}"
-        # Erros também não devem poluir a cache
         if speak_response: play_tts(error_msg, use_cache=False)
         return error_msg
 
 def process_user_query():
     try:
+        # Grava -> Transcreve (com filtro e fixes) -> Responde
         text = transcribe_audio(record_audio())
-        print(f"User: {text}")
-        if text: route_and_respond(text)
+        if text: 
+            print(f"User (Final): {text}")
+            route_and_respond(text)
+        else:
+            print("User: (Vazio ou Ignorado)")
     except: pass
 
 # --- OTIMIZAÇÃO: Cache de Greetings ---
@@ -200,7 +246,7 @@ def prepare_greetings_cache():
 def play_cached_greeting():
     try:
         wav_files = glob.glob(os.path.join(GREETINGS_CACHE_DIR, "*.wav"))
-        if not wav_files: play_tts("Sim?"); return
+        if not wav_files: play_tts("Sim?", use_cache=True); return
         subprocess.run(['aplay', '-D', config.ALSA_DEVICE_OUT, '-q', random.choice(wav_files)], check=False)
     except: pass
 
@@ -211,7 +257,7 @@ app = Flask(__name__)
 def api_command():
     d = request.json; p = d.get('prompt')
     if not p: return jsonify({"status":"err"}), 400
-    if p.lower().startswith("diz "): play_tts(p[4:].strip()); return jsonify({"status":"ok"})
+    if p.lower().startswith("diz "): play_tts(p[4:].strip(), use_cache=False); return jsonify({"status":"ok"})
     return jsonify({"status":"ok", "response": route_and_respond(p, False)})
 
 @app.route("/device_status")
@@ -356,7 +402,9 @@ if __name__ == "__main__":
     setup_database()
     
     # --- NOVO: Limpeza da Cache TTS (> 30 dias) ---
-    clean_old_cache(days=30)
+    try:
+        clean_old_cache(days=30)
+    except: pass
     # ----------------------------------------------
     
     load_skills()
@@ -379,6 +427,7 @@ if __name__ == "__main__":
         print(f"A carregar modelos (Whisper: {config.WHISPER_MODEL}, Ollama: {config.OLLAMA_MODEL_PRIMARY})...")
         whisper_model = whisper.load_model(config.WHISPER_MODEL, device="cpu")
         print("A aquecer o modelo Whisper...")
+        # Aquecimento com array vazio
         whisper_model.transcribe(np.zeros(16000, dtype=np.float32), language='pt') 
         ollama_client = ollama.Client()
         print("Modelos carregados.")
