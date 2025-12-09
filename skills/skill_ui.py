@@ -24,7 +24,6 @@ def handle_weather_api():
             return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)})
-
 def handle_request():
     """ Serve a página HTML principal do frontend. """
     return """
@@ -46,9 +45,15 @@ def handle_request():
                 margin: 0; overflow: hidden;
             }
 
-            /* --- HEADER --- */
+            /* --- HEADER (MODIFICADO PARA 2 LINHAS) --- */
             #header-strip {
-                display: flex; align-items: center; background: #181818; border-bottom: 1px solid #333; height: 85px; flex-shrink: 0;
+                display: flex; 
+                align-items: flex-start; /* Alinha ao topo para suportar múltiplas linhas */
+                background: #181818; 
+                border-bottom: 1px solid #333; 
+                /* Aumentámos a altura para acomodar duas filas de dispositivos (~75px cada) */
+                height: 160px; 
+                flex-shrink: 0;
             }
             #brand {
                 display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -60,25 +65,31 @@ def handle_request():
             #brand-logo { font-size: 1.8rem; animation: floatGhost 3s ease-in-out infinite; }
             #brand-name { font-size: 0.7rem; font-weight: bold; color: #666; margin-top: 2px; letter-spacing: 1px; }
 
-            /* --- DEVICE SCROLL & AGRUPAMENTO --- */
+            /* --- DEVICE WRAP & AGRUPAMENTO --- */
             #topbar {
-                flex: 1; display: flex; align-items: flex-start; /* Alinhamento superior para cabeçalhos */
-                overflow-x: auto; 
-                white-space: nowrap; 
-                -webkit-overflow-scrolling: touch;
+                flex: 1; display: flex; 
+                align-items: flex-start;
+                align-content: flex-start; /* Garante que as linhas ficam no topo */
+                flex-wrap: wrap; /* PERMITE DUAS OU MAIS LINHAS */
+                overflow-y: auto; /* Scroll Vertical se passar das 2 linhas */
+                overflow-x: hidden; /* Remove scroll horizontal */
                 height: 100%; padding-left: 10px; 
-                scrollbar-width: none;
                 padding-top: 5px;
+                padding-bottom: 5px;
             }
-            #topbar::-webkit-scrollbar { display: none; }
+            /* Scrollbar subtil para o topbar vertical */
+            #topbar::-webkit-scrollbar { width: 4px; }
+            #topbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 
             .device-room {
                 display: inline-flex;
                 flex-direction: column;
-                margin-right: 20px; 
-                padding-right: 15px;
-                border-right: 1px solid #333; /* Separador Visual */
+                margin-right: 10px; 
+                margin-bottom: 10px; /* Espaço inferior para a segunda linha não colar */
+                padding-right: 10px;
+                border-right: 1px solid #333;
                 vertical-align: top;
+                height: auto;
             }
             .room-header {
                 font-size: 0.75rem;
@@ -92,14 +103,14 @@ def handle_request():
             .room-content {
                 display: flex;
                 gap: 10px;
-                white-space: nowrap; /* Garante que os dispositivos ficam em linha */
+                flex-wrap: wrap; /* Garante que os dispositivos dentro da sala também fluem se necessário */
             }
 
             /* --- WIDGETS (SWITCHES/SENSORES) --- */
             .device-toggle, .device-sensor { 
                 display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
                 opacity: 0.5; transition: all 0.3s; min-width: 60px; height: 52px; box-sizing: border-box;
-                padding: 4px; border-radius: 8px; margin-top: 5px;
+                padding: 4px; border-radius: 8px; margin-top: 0px; /* Removido margin-top excessivo */
             }
             .device-toggle { background: #222; }
             .device-sensor { background: #252525; border: 1px solid #333; padding: 5px 8px; }
