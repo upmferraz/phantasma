@@ -47,6 +47,34 @@ def _get_moon_phase():
         return "Lua Nova"
     except: return ""
 
+def _get_weather_desc(type_id):
+    types = {
+        1: "céu limpo", 2: "céu pouco nublado", 3: "céu nublado",
+        4: "céu muito nublado", 5: "céu encoberto", 6: "chuva",
+        7: "aguaceiros fracos", 8: "aguaceiros", 9: "chuva",
+        10: "chuva fraca", 11: "chuva forte", 16: "nevoeiro"
+    }
+    return types.get(type_id, "céu nublado")
+
+# --- Helpers de Aconselhamento (NOVO) ---
+
+def _get_uv_advice(uv):
+    val = int(round(uv))
+    if val < 3: return "baixo", "" # Não chateia com UV baixo
+    if val < 6: return "moderado", "usa óculos de sol"
+    if val < 8: return "alto", "usa protetor solar"
+    if val < 11: return "muito alto", "evita o sol direto"
+    return "extremo", "é perigoso sair sem proteção"
+
+def _get_aqi_advice(aqi):
+    val = int(aqi)
+    if val <= 50: return "boa", "" # Ar bom, sem avisos
+    if val <= 100: return "moderada", "se fores sensível tem cuidado"
+    if val <= 150: return "insalubre", "evita exercício na rua"
+    return "perigosa", "usa máscara ou fica em casa"
+
+# --- Fetch de Dados ---
+
 def _fetch_city_data(global_id):
     result = {"timestamp": time.time(), "city_id": global_id}
     client = httpx.Client(timeout=10.0)
@@ -61,12 +89,27 @@ def _fetch_city_data(global_id):
             lat = result['forecast'][0].get('latitude')
             lon = result['forecast'][0].get('longitude')
             
-            # 2. AQI (Open-Meteo Fallback)
+            # 2. UV (Open-Meteo)
             try:
-                url_aqi = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=us_aqi"
-                aqi_data = client.get(url_aqi, timeout=5.0).json()
-                result['aqi'] = aqi_data['current']['us_aqi']
+                url_uv = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=uv_index"
+                uv_data = client.get(url_uv, timeout=3.0).json()
+                result['uv'] = uv_data['current']['uv_index']
             except: pass
+
+            # 3. AQI
+            try:
+                # Tenta Open-Meteo como primário (mais rápido/estável para free tier)
+                url_oma = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=us_aqi"
+                oma_res = client.get(url_oma, timeout=5.0).json()
+                result['aqi'] = oma_res['current']['us_aqi']
+            except: 
+                # Fallback IQAir se configurado
+                if hasattr(config, 'IQAIR_KEY') and config.IQAIR_KEY:
+                    try:
+                        url_iq = f"http://api.airvisual.com/v2/nearest_city?lat={lat}&lon={lon}&key={config.IQAIR_KEY}"
+                        iq_data = client.get(url_iq, timeout=5.0).json()
+                        result['aqi'] = iq_data['data']['current']['pollution']['aqius']
+                    except: pass
 
         result['moon_phase'] = _get_moon_phase()
         return result
@@ -82,7 +125,6 @@ def _fetch_city_data(global_id):
 def _save_cache(data):
     try:
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-        # Escrita atómica para evitar ficheiros corrompidos
         with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(CACHE_FILE), delete=False) as tf:
             json.dump(data, tf)
             temp_name = tf.name
@@ -106,7 +148,7 @@ def init_skill_daemon():
 def handle(user_prompt_lower, user_prompt_full):
     try:
         if not os.path.exists(CACHE_FILE):
-            return "Ainda estou a recolher dados meteorológicos. Aguarda um momento."
+            return "Ainda estou a recolher dados meteorológicos."
             
         with open(CACHE_FILE, 'r') as f:
             data = json.load(f)
@@ -114,32 +156,59 @@ def handle(user_prompt_lower, user_prompt_full):
         if not data or not data.get('forecast'):
             return "Não tenho dados de previsão disponíveis."
 
-        # Seleciona dia (hoje/amanhã)
-        idx = 1 if "amanhã" in user_prompt_lower else 0
+        is_tomorrow = "amanhã" in user_prompt_lower
+        idx = 1 if is_tomorrow else 0
         if len(data['forecast']) <= idx: return "Previsão indisponível."
         
         day = data['forecast'][idx]
         
-        # --- CORREÇÃO: ARREDONDAMENTO PARA INTEIROS ---
-        t_max = round(float(day.get('tMax', 0)))
-        t_min = round(float(day.get('tMin', 0)))
-        
-        # Resposta Base
-        resp = f"Previsão: Máxima de {t_max} e mínima de {t_min} graus."
-        
-        # Chuva (converter para int para remover casa decimal)
+        # Valores Inteiros
+        t_max = int(round(float(day.get('tMax', 0))))
+        t_min = int(round(float(day.get('tMin', 0))))
         precip = int(float(day.get('precipitaProb', 0)))
+        w_desc = _get_weather_desc(day.get('idWeatherType'))
         
-        if precip > 50: resp += f" Leva guarda-chuva, probabilidade de chuva é {precip}%."
-        elif precip > 0: resp += f" Possibilidade de chuva ({precip}%)."
+        current_hour = datetime.now().hour
+        is_night = (current_hour >= 19 or current_hour < 7) and not is_tomorrow
+
+        # 1. Pergunta CHUVA
+        if any(x in user_prompt_lower for x in ["chover", "chuva", "molhar", "água"]):
+            if precip >= 50: return f"Sim, vai chover ({precip}%)."
+            elif precip > 0: return f"Talvez, há {precip}% de hipóteses."
+            else: return "Não, não vai chover."
+
+        # 2. Resposta GERAL
+        resp = f"Previsão: {w_desc}, máxima de {t_max} e mínima de {t_min} graus."
         
-        # Extras (só se relevante)
+        extras = []
+        
+        # Qualidade do Ar (Com conselhos)
         if 'aqi' in data:
-            aqi = data['aqi']
-            if aqi > 100: resp += f" Atenção, a qualidade do ar está má ({aqi})."
+            aqi = int(data['aqi'])
+            desc, advice = _get_aqi_advice(aqi)
+            # Constrói a frase do ar
+            air_str = f"qualidade do ar {desc} ({aqi})"
+            if advice: air_str += f", {advice}"
+            extras.append(air_str)
+            
+        # UV (Com conselhos, só de dia)
+        if 'uv' in data and not is_night:
+            uv = float(data['uv'])
+            desc, advice = _get_uv_advice(uv)
+            uv_str = f"índice UV {int(round(uv))}"
+            if advice: uv_str += f" ({advice})"
+            extras.append(uv_str)
+            
+        # Lua (Só à noite)
+        if is_night and 'moon_phase' in data:
+            extras.append(f"fase lunar {data['moon_phase']}")
+            
+        if extras:
+            # Junta tudo de forma natural
+            resp += " " + ", ".join(extras).capitalize() + "."
             
         return resp
 
     except Exception as e:
         print(f"[Weather] Erro handle: {e}")
-        return "Ocorreu um erro ao verificar a meteorologia."
+        return "Erro na meteorologia."
