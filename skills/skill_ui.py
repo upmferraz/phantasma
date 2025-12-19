@@ -194,7 +194,6 @@ def handle_request():
 
         <div id="header-strip">
             <div id="brand" onclick="triggerEasterEgg()">
-                
                 <div id="sky-stage">
                     <div class="sky-element" title="Meteorologia">
                         <div id="main-weather-icon">☁️</div>
@@ -204,14 +203,11 @@ def handle_request():
                         <div id="main-moon-icon">🌑</div>
                     </div>
                 </div>
-
                 <div id="ghost-stage">
                     <div id="brand-logo" class="ghost-normal">👻</div>
                     <div id="aqi-indicator" title="Qualidade do Ar"></div>
                 </div>
-
                 <div id="brand-name">pHantasma</div>
-                
                 <div id="power-display" title="Consumo Geral">-- W</div>
             </div>
             <div id="topbar"></div>
@@ -274,7 +270,6 @@ def handle_request():
                 return roomContainer;
             }
 
-            // --- INDICADOR DE ESCRITA ---
             function showTypingIndicator() {
                 if (document.getElementById('typing-indicator-row')) return;
                 const row = document.createElement('div'); row.id = 'typing-indicator-row'; row.className = 'msg-row ia'; 
@@ -295,8 +290,7 @@ def handle_request():
 
             async function sendChatCommand() {
                 const prompt = chatInput.value.trim(); if (!prompt) return;
-                addToChatLog(prompt, 'user'); 
-                chatInput.value = ''; chatInput.style.height = '24px'; 
+                addToChatLog(prompt, 'user'); chatInput.value = ''; chatInput.style.height = '24px'; 
                 showTypingIndicator(); 
                 try {
                     const res = await fetch('/comando', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt}) });
@@ -314,7 +308,6 @@ def handle_request():
                 } catch (e) { removeTypingIndicator(); }
             }
 
-            // --- BUILDERS ---
             function createToggle(device) {
                 const container = getOrCreateRoomContainer(getRoomName(device));
                 const div = document.createElement('div'); div.className = 'device-toggle'; div.title = device;
@@ -322,7 +315,6 @@ def handle_request():
                 const icon = document.createElement('span'); icon.className = 'device-icon'; icon.innerText = getDeviceIcon(device);
                 const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
                 const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
-                
                 input.onchange = () => {
                     handleDeviceAction(device, input.checked ? 'ligar' : 'desligar');
                     div.dataset.state = input.checked ? 'on' : 'off';
@@ -347,7 +339,6 @@ def handle_request():
                 ALL_DEVICES_ELEMENTS.push({ name: device, type: 'sensor', element: div, dataSpan: dataSpan, label: label });
             }
 
-            // --- UPDATERS ---
             async function fetchDeviceStatus(item) {
                 const { name, element, input, label } = item;
                 try {
@@ -376,26 +367,37 @@ def handle_request():
                     const data = await res.json();
                     element.style.opacity = data.state === 'unreachable' ? 0.5 : 1;
                     if (data.state === 'unreachable') return;
-                    let text = 'ON'; let color = '#4db6ac';
-                    if (data.power_w !== undefined) { text = Math.round(data.power_w) + ' W'; color = "#ffb74d"; }
-                    else if (data.temperature !== undefined) text = Math.round(data.temperature) + '°';
-                    else if (data.ppm !== undefined) { text = data.ppm + ' ppm'; if (data.status!=='normal') color='#ff5252'; }
-                    dataSpan.innerText = text; dataSpan.style.color = color;
+
+                    // CORREÇÃO: Lógica para Humidade + Temperatura
+                    let textParts = [];
+                    let color = '#4db6ac';
+
+                    if (data.power_w !== undefined) { 
+                        textParts.push(Math.round(data.power_w) + ' W'); 
+                        color = "#ffb74d"; 
+                    } else {
+                        if (data.temperature !== undefined) textParts.push(Math.round(data.temperature) + '°');
+                        if (data.humidity !== undefined) textParts.push(data.humidity + '%');
+                        if (data.ppm !== undefined) { 
+                            textParts.push(data.ppm + ' ppm'); 
+                            if (data.status!=='normal') color='#ff5252'; 
+                        }
+                    }
+
+                    dataSpan.innerText = textParts.length > 0 ? textParts.join(' ') : 'ON';
+                    dataSpan.style.color = color;
                 } catch (e) {}
             }
 
-            // --- UPDATE CONSUMO CASA ---
             async function updateHomePower() {
                 try {
                     const res = await fetch(`/device_status?nickname=casa`);
                     const data = await res.json();
-                    const el = document.getElementById('power-display'); // ALTERADO ID
+                    const el = document.getElementById('power-display');
                     if (data.power_w !== undefined) {
                         el.innerText = `${Math.round(data.power_w)} W`; el.style.color = "#ffb74d"; 
-                    } else {
-                        el.innerText = "-- W"; el.style.color = "#444";
-                    }
-                } catch(e) { console.log("Power update fail", e); }
+                    } else { el.innerText = "-- W"; el.style.color = "#444"; }
+                } catch(e) {}
             }
 
             async function updateWeather() {
@@ -403,39 +405,27 @@ def handle_request():
                     const res = await fetch('/api/weather'); const data = await res.json();
                     if (!data.forecast) return;
                     const today = data.forecast[0];
-
                     let wType = today.idWeatherType;
                     let wIcon = '☁️';
                     let ghostClass = 'ghost-normal';
-
                     if (wType === 1) { wIcon = '☀️'; ghostClass = 'ghost-sun'; }
                     else if (wType <= 5) { wIcon = '⛅'; ghostClass = 'ghost-normal'; }
                     else if (wType <= 15) { wIcon = '🌧️'; ghostClass = 'ghost-rain'; }
                     else if (wType >= 16) { wIcon = '🌫️'; ghostClass = 'ghost-normal'; }
-
                     document.getElementById('main-weather-icon').innerText = wIcon;
                     document.getElementById('main-weather-temp').innerText = `${Math.round(today.tMax)}°`;
-                    
                     const ghost = document.getElementById('brand-logo');
                     ghost.className = ''; ghost.classList.add(ghostClass);
-
-                    // LUA
                     let mIcon = '🌑'; const moon = data.moon_phase || "";
                     if (moon.includes("Crescente")) mIcon = '🌓'; else if (moon.includes("Cheia")) mIcon = '🌕'; else if (moon.includes("Minguante")) mIcon = '🌗';
                     document.getElementById('main-moon-icon').innerText = mIcon;
-                    // Tooltip da lua
                     document.querySelector('.sky-element[title="Fase Lunar"]').title = moon || "Fase Lunar";
-
-                    // AR (AQI) - Ícone flutuante
-                    const aqi = data.aqi;
-                    const aqiEl = document.getElementById('aqi-indicator');
+                    const aqi = data.aqi; const aqiEl = document.getElementById('aqi-indicator');
                     if (aqi !== undefined) {
                         if (aqi <= 50) { aqiEl.innerText = '🍃'; aqiEl.title = `AQI ${aqi} (Bom)`; }
                         else if (aqi <= 100) { aqiEl.innerText = '😷'; aqiEl.title = `AQI ${aqi} (Moderado)`; }
                         else { aqiEl.innerText = '☠️'; aqiEl.title = `AQI ${aqi} (Mau)`; }
-                    } else {
-                        aqiEl.innerText = '';
-                    }
+                    } else { aqiEl.innerText = ''; }
                 } catch(e) {}
             }
 
@@ -445,18 +435,12 @@ def handle_request():
                     const allDevices = [];
                     if (data.devices?.status) data.devices.status.forEach(d => allDevices.push({name: d, type: 'sensor'}));
                     if (data.devices?.toggles) data.devices.toggles.forEach(d => allDevices.push({name: d, type: 'toggle'}));
-
                     const grouped = {};
                     ROOMS_ORDER.forEach(r => grouped[r] = []); 
                     allDevices.forEach(d => grouped[getRoomName(d.name)].push(d));
-
                     for (const room of ROOMS_ORDER) {
                         const devs = grouped[room];
-                        if (devs && devs.length > 0) {
-                            devs.forEach(d => {
-                                if (d.type === 'sensor') createSensor(d.name); else createToggle(d.name);
-                            });
-                        }
+                        if (devs && devs.length > 0) devs.forEach(d => { if (d.type === 'sensor') createSensor(d.name); else createToggle(d.name); });
                     }
                     updateHomePower(); updateWeather();
                     setInterval(() => {
@@ -464,7 +448,6 @@ def handle_request():
                         updateHomePower(); 
                     }, 5000);
                     setInterval(updateWeather, 600000);
-
                 } catch (e) {}
             }
 
@@ -476,18 +459,10 @@ def handle_request():
             }
             function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
             chatSend.onclick = sendChatCommand; 
-            
             chatInput.onkeydown = (e) => { 
-                if (e.key === 'Enter' && !e.shiftKey) { 
-                    e.preventDefault();
-                    sendChatCommand(); 
-                }
-                setTimeout(() => {
-                    chatInput.style.height = 'auto';
-                    chatInput.style.height = chatInput.scrollHeight + 'px';
-                }, 0);
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatCommand(); }
+                setTimeout(() => { chatInput.style.height = 'auto'; chatInput.style.height = chatInput.scrollHeight + 'px'; }, 0);
             };
-
             loadDevicesStructure(); loadHelp(); addToChatLog("Nas sombras, aguardo...", "ia");
         </script>
     </body>
