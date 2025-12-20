@@ -34,10 +34,30 @@ from data_utils import setup_database, retrieve_from_rag, get_cached_response, s
 from tools import search_with_searxng
 
 # --- LISTA DE ALUCINAÇÕES CONHECIDAS DO WHISPER (Restaurada) ---
+# --- FILTRO DE ALUCINAÇÕES ---
 WHISPER_HALLUCINATIONS = [
     "Mais sobre isso", "Mais sobre isso.", "Obrigado.", "Obrigado",
-    "Sous-titres réalisés par", "Amara.org", "MBC", "S.A.", ".", "?"
+    "Sous-titres réalisés par", "Amara.org", "MBC", "S.A.", ".", "?",
+    "P.S.", "Entrando a", "A p", "O p"
 ]
+
+def is_hallucination(text):
+    """
+    Verifica se o texto é uma alucinação conhecida ou lixo (ex: caracteres cirílicos misturados).
+    """
+    if not text or len(text.strip()) < 2:
+        return True
+    
+    # Se o texto estiver na lista negra exata
+    if text.strip() in WHISPER_HALLUCINATIONS:
+        return True
+
+    # Deteta caracteres Cirílicos (comuns em alucinações do Whisper com ruído)
+    # O user reportou: "vozão" escrito como "возão" (mistura de alfabetos)
+    if re.search(r'[а-яА-Я]', text):
+        return True
+
+    return False
 
 # --- Globais ---
 whisper_model = None
@@ -87,10 +107,20 @@ def transcribe_audio(audio_data):
         )
         text = res['text'].strip()
         
+        # --- LOG DO TEXTO CRU (DEBUG) ---
+        if text:
+            print(f"Whisper Raw: '{text}'")
+        # --------------------------------
+
         # Filtro de Alucinações
         if text in WHISPER_HALLUCINATIONS or text.startswith("Sous-titres"):
             print(f"ALERTA: Alucinação ignorada: '{text}'")
             return ""
+
+        # Deteta caracteres Cirílicos (comuns em alucinações do Whisper com ruído)
+        if re.search(r'[а-яА-Я]', text):
+             print(f"ALERTA: Alucinação (Cirílico) ignorada: '{text}'")
+             return ""
 
         # Correções Fonéticas
         if hasattr(config, 'PHONETIC_FIXES') and text:
@@ -152,7 +182,7 @@ def route_and_respond(user_prompt, speak_response=True):
                 conversation_history.append({'role': 'assistant', 'content': cached_text})
             
             if llm_response is None:
-                if speak_response: play_tts(random.choice(["Deixa-me pensar...", "hmm..."]), use_cache=True)
+                if speak_response: play_tts(random.choice(["Deixa-me pensar...", "Vou pensar sobre isso..."]), use_cache=True)
                 llm_response = process_with_ollama(prompt=user_prompt)
                 if llm_response: save_cached_response(user_prompt, llm_response)
 
@@ -251,9 +281,9 @@ def main():
     print(f"--- Phantasma ONLINE (Smart Noise Gate) ---")
 
     # --- DEFINIÇÕES DE SENSIBILIDADE ---
-    NOISE_LIMIT = 1000
+    NOISE_LIMIT = 1500
     THRESH_BASE = config.WAKEWORD_CONFIDENCE 
-    THRESH_HIGH = 0.75   
+    THRESH_HIGH = 0.55   
 
     while True:
         if oww_model:
