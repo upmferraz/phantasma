@@ -13,6 +13,15 @@ MIC_SAMPLERATE = 16000 # 16kHz
 ALSA_DEVICE_IN = 0
 ALSA_DEVICE_OUT = "plughw:0,0"
 
+# --- WAKE WORD (openWakeWord) ---
+# Modelos possíveis: 'hey_jarvis', 'alexa', 'hey_mycroft', 'hey_rhasspy', 'timer', 'weather'
+# Podes colocar mais do que um: ['hey_jarvis', 'alexa']
+WAKEWORD_MODELS = ['hey_jarvis'] 
+
+# Sensibilidade (0.0 a 1.0). 
+# 0.5 é o padrão. 0.6 ou 0.7 é recomendado para evitar falsos positivos da TV.
+WAKEWORD_CONFIDENCE = 0.6
+
 # --- Configs de Processamento (IA) ---
 OLLAMA_MODEL_PRIMARY = "qwen3:8b" # O teu modelo 8K
 OLLAMA_MODEL_FALLBACK = "qwen3:8b"

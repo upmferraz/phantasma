@@ -231,17 +231,20 @@ def play_cached_greeting():
         subprocess.run(['aplay', '-D', config.ALSA_DEVICE_OUT, '-q', random.choice(wavs)], check=False)
     except: pass
 
-# --- MAIN LOOP (openWakeWord + Lógica Fina) ---
 def main():
     # Inicializa openWakeWord
     oww_model = None
     if Model:
         try:
-            try: oww_model = Model()
+            try: 
+                print(f"A carregar modelos WakeWord: {config.WAKEWORD_MODELS}")
+                oww_model = Model(wakeword_models=config.WAKEWORD_MODELS)
             except: 
+                print("A descarregar modelos...")
                 openwakeword.utils.download_models()
-                oww_model = Model()
-            print(f"WakeWords: {list(oww_model.models.keys())}")
+                oww_model = Model(wakeword_models=config.WAKEWORD_MODELS)
+            
+            print(f"WakeWords ativas: {list(oww_model.models.keys())}")
         except Exception as e: print(f"Erro WakeWord: {e}")
 
     print(f"--- Phantasma ONLINE (openWakeWord) ---")
@@ -249,19 +252,25 @@ def main():
     while True:
         if oww_model:
             try:
-                # 1. Escuta Hotword (Sem device específico)
+                # 1. Escuta Hotword
                 with sd.InputStream(channels=1, samplerate=16000, dtype='int16', blocksize=1280) as stream:
                     while True:
                         chunk, _ = stream.read(1280)
                         prediction = oww_model.predict(chunk.flatten())
-                        if any(score > 0.5 for score in prediction.values()):
-                            print("**** HOTWORD DETETADA ****")
+                        
+                        # Verifica qual disparou e com que confiança
+                        best_model = max(prediction, key=prediction.get)
+                        best_score = prediction[best_model]
+
+                        # Usa o valor do config.py
+                        if best_score > config.WAKEWORD_CONFIDENCE:
+                            print(f"\n**** HOTWORD DETETADA: '{best_model}' ({best_score:.2f}) ****")
                             break
                 
-                # 2. Respiro para o ALSA (Crucial)
+                # 2. Respiro ALSA
                 time.sleep(0.3)
                 
-                # 3. Processamento com configurações afinadas
+                # 3. Processamento
                 play_cached_greeting()
                 process_user_query()
                 
@@ -271,7 +280,7 @@ def main():
                 print(f"Erro loop voz: {e}")
                 time.sleep(1)
         else:
-            time.sleep(10) # Modo fallback se WW falhar
+            time.sleep(10)
 
 if __name__ == "__main__":
     if config.OLLAMA_THREADS > 0: os.environ['OLLAMA_NUM_THREAD'] = str(config.OLLAMA_THREADS)
