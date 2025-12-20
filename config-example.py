@@ -56,7 +56,27 @@ PHONETIC_FIXES = {
     "o tempo amanhã": "como vai estar o tempo amanhã",
 }
 # Skills
+# --- Configuração Discord ---
+DISCORD_BOT_TOKEN = "O_TEU_TOKEN_DO_DISCORD_AQUI"
+
+# IDs dos utilizadores (Inteiros)
+# Para obter o ID no Discord: Settings -> Advanced -> Developer Mode -> Botão direito no user -> Copy ID
+DISCORD_ADMIN_USERS = [
+    123456789012345678,  # O teu ID (Admin total)
+]
+
+DISCORD_STANDARD_USERS = [
+    987654321098765432,  # Utilizador limitado
+    112233445566778899,
+]
+
+# Configuração de Limites
+DISCORD_DAILY_LLM_LIMIT = 3  # Perguntas ao LLM por dia para standard users
+
+# Gemini
 GEMINI_API_KEY = "GEMINI_API_KEY"
+
+# Devices
 SHELLY_GAS_URL = "http://ip-address/status"
 
 # --- CONFIGURAÇÃO XIAOMI (MIIO) ---
