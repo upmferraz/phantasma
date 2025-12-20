@@ -238,25 +238,21 @@ def main():
         try:
             try: 
                 print(f"A carregar modelos WakeWord: {config.WAKEWORD_MODELS}")
-                oww_model = Model(wakeword_models=config.WAKEWORD_MODELS)
-            except: 
-                print("A descarregar modelos...")
+                # CORREÇÃO: Forçar inference_framework="onnx"
+                oww_model = Model(wakeword_models=config.WAKEWORD_MODELS, inference_framework="onnx")
+            except Exception as e_load: 
+                print(f"Erro ao carregar modelo customizado ({e_load}). A tentar padrão...")
                 openwakeword.utils.download_models()
-                oww_model = Model(wakeword_models=config.WAKEWORD_MODELS)
+                oww_model = Model(wakeword_models=['hey_jarvis'], inference_framework="onnx")
             
             print(f"WakeWords ativas: {list(oww_model.models.keys())}")
-        except Exception as e: print(f"Erro WakeWord: {e}")
+        except Exception as e: print(f"ERRO FATAL WakeWord: {e}")
 
     print(f"--- Phantasma ONLINE (Smart Noise Gate) ---")
 
     # --- DEFINIÇÕES DE SENSIBILIDADE ---
-    NOISE_LIMIT = 1000    # Acima disto é considerado "Barulho de Fundo Alto" (TV)
-    
-    # Valores de Confiança (0.0 a 1.0)
-    # BASE: O valor normal. 0.5 filtra bem conversas distantes.
+    NOISE_LIMIT = 1000
     THRESH_BASE = config.WAKEWORD_CONFIDENCE 
-    
-    # HIGH: Só ativa se tiver 100% certeza (para quando a TV está aos berros)
     THRESH_HIGH = 0.75   
 
     while True:
@@ -266,13 +262,9 @@ def main():
                     while True:
                         chunk, _ = stream.read(1280)
                         
-                        # 1. Medir o volume ambiente (RMS)
                         chunk_float = chunk.flatten().astype(np.float32)
                         rms = np.sqrt(np.mean(chunk_float**2))
                         
-                        # 2. Lógica de Proteção Unidirecional
-                        # Se houver muito barulho, sobe o escudo.
-                        # Se houver silêncio, MANTÉM o padrão (não baixa a guarda).
                         if rms > NOISE_LIMIT:
                             current_threshold = THRESH_HIGH
                             mode = "Escudo 🛡️"
@@ -280,14 +272,13 @@ def main():
                             current_threshold = THRESH_BASE
                             mode = "Normal"
 
-                        # 3. Verificar WakeWord
                         prediction = oww_model.predict(chunk.flatten())
                         best_model = max(prediction, key=prediction.get)
                         best_score = prediction[best_model]
 
-                        # DEBUG: Descomenta para ver os scores de vozes distantes
-                        # if best_score > 0.3:
-                        #    print(f"\rDetetado: {best_model} ({best_score:.2f}) | Vol: {int(rms)} | Modo: {mode}", end='', flush=True)
+                        # DEBUG: Descomenta para ver se ele ouve "hey_fantasma"
+                        # if best_score > 0.1:
+                        #    print(f"\rDetetado: {best_model} ({best_score:.2f}) | Vol: {int(rms)}", end='', flush=True)
 
                         if best_score > current_threshold:
                             print(f"\n\n**** ATIVADO ({mode}): '{best_model}' (Score: {best_score:.2f} | Vol: {int(rms)}) ****")
@@ -306,7 +297,8 @@ def main():
                 print(f"\nErro loop voz: {e}")
                 time.sleep(1)
         else:
-            time.sleep(10)
+            print("À espera do modelo WakeWord...")
+            time.sleep(5)
 
 if __name__ == "__main__":
     if config.OLLAMA_THREADS > 0: os.environ['OLLAMA_NUM_THREAD'] = str(config.OLLAMA_THREADS)

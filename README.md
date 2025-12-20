@@ -340,6 +340,7 @@ Para treinar uma *hotword* personalizada (ex: "Ei Fantasma"), é necessário tre
 
 ### Notas finais:
 O código deste modelo e até idealização do projeto, e até mesmo este readme é fortemente gerado pelo Google Gemini.
+O modelo para a hotword 'hey fantasma' foi treinada com recurso ao Google Colab.
 Como equipamento, estou a usar um HP Mini G4, com 16GB de RAM e um Jabra SPEAK 410 como dispositivo de audio.
 
 ## Licença
