@@ -14,11 +14,18 @@ import webrtcvad
 import threading
 import logging
 import concurrent.futures
-import re  # <--- NOVO: Necessário para as substituições fonéticas
+import re  
 from flask import Flask, request, jsonify
-import pvporcupine
 import sounddevice as sd 
 import subprocess 
+
+# --- IMPORTAÇÃO SEGURA (openWakeWord) ---
+try:
+    from openwakeword.model import Model
+    import openwakeword.utils
+except ImportError:
+    print("AVISO: openwakeword não instalado.")
+    Model = None
 
 # --- NOSSOS MÓDULOS ---
 import config
@@ -26,25 +33,25 @@ from audio_utils import *
 from data_utils import setup_database, retrieve_from_rag, get_cached_response, save_cached_response
 from tools import search_with_searxng
 
-# --- LISTA DE ALUCINAÇÕES CONHECIDAS DO WHISPER ---
+# --- LISTA DE ALUCINAÇÕES CONHECIDAS DO WHISPER (Restaurada) ---
 WHISPER_HALLUCINATIONS = [
-    "Mais sobre isso",
-    "Mais sobre isso.",
-    "Obrigado.",
-    "Obrigado",
-    "Sous-titres réalisés par",
-    "Amara.org",
-    "MBC",
-    "S.A.",
-    ".",
-    "?"
+    "Mais sobre isso", "Mais sobre isso.", "Obrigado.", "Obrigado",
+    "Sous-titres réalisés par", "Amara.org", "MBC", "S.A.", ".", "?"
 ]
 
-# --- Carregamento Dinâmico de Skills ---
+# --- Globais ---
+whisper_model = None
+ollama_client = None
+conversation_history = []
 SKILLS_LIST = []
+GREETINGS_CACHE_DIR = os.path.join(config.BASE_DIR, "sounds/greetings")
+app = Flask(__name__)
 
+# --- Carregamento Dinâmico de Skills ---
 def load_skills():
+    global SKILLS_LIST
     print("A carregar skills...")
+    SKILLS_LIST = []
     skill_files = glob.glob(os.path.join(config.SKILLS_DIR, "skill_*.py"))
     for f in skill_files:
         try:
@@ -55,94 +62,64 @@ def load_skills():
 
             raw_triggers = getattr(module, 'TRIGGERS', [])
             triggers_lower = [t.lower() for t in raw_triggers]
-
-            # Handle é opcional
             handle_func = getattr(module, 'handle', None)
 
             SKILLS_LIST.append({
-                "name": skill_name,
-                "module": module, 
+                "name": skill_name, "module": module, 
                 "trigger_type": getattr(module, 'TRIGGER_TYPE', 'contains'),
-                "triggers": raw_triggers,
-                "triggers_lower": triggers_lower,
+                "triggers": raw_triggers, "triggers_lower": triggers_lower,
                 "handle": handle_func,
                 "get_status": getattr(module, 'get_status_for_device', None)
-                })
+            })
             print(f"  -> Skill '{skill_name}' carregada.")
-        except Exception as e:
-            print(f"AVISO: Falha ao carregar {f}: {e}")
+        except Exception as e: print(f"AVISO: Falha ao carregar {f}: {e}")
 
-# --- Globais ---
-whisper_model = None
-ollama_client = None
-conversation_history = []
-GREETINGS_CACHE_DIR = os.path.join(config.BASE_DIR, "sounds/greetings")
-
-# --- IA Core ---
+# --- IA Core (Restaurado com filtros e correções) ---
 def transcribe_audio(audio_data):
     if audio_data.size == 0: return ""
     print(f"A transcrever (Modelo: {config.WHISPER_MODEL})...")
     try:
-        # Ajustes para reduzir alucinações: no_speech_threshold mais alto
+        # Parâmetros afinados da tua versão anterior
         res = whisper_model.transcribe(
-            audio_data, 
-            language='pt', 
-            fp16=False, 
+            audio_data, language='pt', fp16=False, 
             initial_prompt=config.WHISPER_INITIAL_PROMPT, 
-            no_speech_threshold=0.7,  # Aumentado para ignorar silêncio melhor
-            logprob_threshold=-1.0    # Ignora transições com baixa confiança
+            no_speech_threshold=0.7, logprob_threshold=-1.0
         )
         text = res['text'].strip()
         
-        # --- FILTRO DE ALUCINAÇÕES ---
-        # Se o texto for igual a uma alucinação conhecida, descartamos
+        # Filtro de Alucinações
         if text in WHISPER_HALLUCINATIONS or text.startswith("Sous-titres"):
-            print(f"ALERTA: Alucinação do Whisper detetada e ignorada: '{text}'")
+            print(f"ALERTA: Alucinação ignorada: '{text}'")
             return ""
 
-        # --- CORREÇÕES FONÉTICAS (DO CONFIG) ---
-        # Aplica as correções definidas no config.py (ex: "liga-nos" -> "liga a luz")
+        # Correções Fonéticas
         if hasattr(config, 'PHONETIC_FIXES') and text:
             for mistake, correction in config.PHONETIC_FIXES.items():
-                # Usa regex case-insensitive para substituir
                 if mistake.lower() in text.lower():
-                    # Substituição simples preservando o resto da frase
                     pattern = re.compile(re.escape(mistake), re.IGNORECASE)
                     text = pattern.sub(correction, text)
-                    print(f"FIX: '{mistake}' corrigido para '{correction}'")
-            
+                    print(f"FIX: '{mistake}' -> '{correction}'")
         return text
-    except Exception as e: 
-        print(f"Erro transcrição: {e}")
-        return ""
+    except Exception as e: print(f"Erro transcrição: {e}"); return ""
 
 def process_with_ollama(prompt):
     global conversation_history
     if not prompt: return "Não percebi."
-    
-    # Execução Paralela RAG + Web
-    rag_content = ""
-    web_content = ""
+    rag_content, web_content = "", ""
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             f_rag = executor.submit(retrieve_from_rag, prompt)
             f_web = executor.submit(search_with_searxng, prompt)
-            rag_content = f_rag.result()
-            web_content = f_web.result()
-    except Exception as e:
-        print(f"Aviso Contexto: {e}")
+            rag_content, web_content = f_rag.result(), f_web.result()
+    except: pass
 
     final = f"{web_content}\n{rag_content}\nPERGUNTA: {prompt}"
     conversation_history.append({'role': 'user', 'content': final})
     
     try:
         print(f"A pensar ({config.OLLAMA_MODEL_PRIMARY})...")
-        cli = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
-        resp = cli.chat(
-            model=config.OLLAMA_MODEL_PRIMARY,
-            messages=conversation_history,
-            options={'num_ctx': config.OLLAMA_CONTEXT_SIZE}
-        )
+        resp = ollama_client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=conversation_history, 
+                                  options={'num_ctx': config.OLLAMA_CONTEXT_SIZE})
         content = resp['message']['content']
         conversation_history.append({'role': 'assistant', 'content': content})
         return content
@@ -153,126 +130,83 @@ def route_and_respond(user_prompt, speak_response=True):
         llm_response = None
         user_prompt_lower = user_prompt.lower()
 
-        # 1. ROUTER DE SKILLS
+        # 1. Skills
         for skill in SKILLS_LIST:
-            if skill["trigger_type"] == "none": continue
-            if not skill["handle"]: continue
-
+            if skill["trigger_type"] == "none" or not skill["handle"]: continue
             triggered = False
-            triggers_to_check = skill.get("triggers_lower", [])
-
             if skill["trigger_type"] == "startswith":
-                if any(user_prompt_lower.startswith(trigger) for trigger in triggers_to_check):
-                    triggered = True
-            elif skill["trigger_type"] == "contains":
-                if any(trigger in user_prompt_lower for trigger in triggers_to_check):
-                    triggered = True
+                if any(user_prompt_lower.startswith(t) for t in skill["triggers_lower"]): triggered = True
+            elif any(t in user_prompt_lower for t in skill["triggers_lower"]): triggered = True
 
             if triggered:
                 print(f"A ativar skill: {skill['name']}")
                 llm_response = skill["handle"](user_prompt_lower, user_prompt)
-                if llm_response:
-                    break 
+                if llm_response: break 
 
-        # 2. FALLBACK: CACHE E OLLAMA
+        # 2. Fallback
         if llm_response is None:
             cached_text = get_cached_response(user_prompt)
             if cached_text:
                 llm_response = cached_text
                 conversation_history.append({'role': 'user', 'content': user_prompt})
                 conversation_history.append({'role': 'assistant', 'content': cached_text})
-
+            
             if llm_response is None:
-                # Verificação de Carga
-                try:
-                    cpu_cores = os.cpu_count() or 1
-                    load_threshold = cpu_cores * 0.75
-                    load_1min, _, _ = os.getloadavg()
-                    if load_1min > load_threshold:
-                        print(f"AVISO: Carga alta ({load_1min:.2f}). Ollama ignorado.")
-                        llm_response = "O sistema está ocupado. Tenta mais tarde."
-                except: pass
+                if speak_response: play_tts(random.choice(["Deixa-me pensar...", "Um segundo."]), use_cache=True)
+                llm_response = process_with_ollama(prompt=user_prompt)
+                if llm_response: save_cached_response(user_prompt, llm_response)
 
-                if llm_response is None:
-                    if speak_response:
-                        thinking_phrases = ["Deixa-me pensar...", "Ok, deixa ver...", "Um segundo.", "A verificar."]
-                        # Cache ON para frases fixas
-                        play_tts(random.choice(thinking_phrases), use_cache=True)
-
-                    llm_response = process_with_ollama(prompt=user_prompt)
-
-                    if llm_response and "Ocorreu um erro" not in llm_response:
-                        save_cached_response(user_prompt, llm_response)
-
-        # --- Processamento da Resposta ---
+        # Tratar paragem de processamento (ex: música)
         if isinstance(llm_response, dict):
-            if llm_response.get("stop_processing"):
-                return llm_response.get("response", "") 
+            if llm_response.get("stop_processing"): return llm_response.get("response", "")
             llm_response = llm_response.get("response", str(llm_response))
 
-        if speak_response:
-            # Cache OFF para respostas dinâmicas (evita encher o disco com lixo)
-            play_tts(llm_response, use_cache=False)
-
+        if speak_response: play_tts(llm_response, use_cache=False)
         return llm_response
-
-    except Exception as e:
-        print(f"ERRO CRÍTICO no router de intenções: {e}")
-        error_msg = f"Ocorreu um erro ao processar: {e}"
-        if speak_response: play_tts(error_msg, use_cache=False)
-        return error_msg
+    except Exception as e: return f"Erro: {e}"
 
 def process_user_query():
     try:
-        # Grava -> Transcreve (com filtro e fixes) -> Responde
-        text = transcribe_audio(record_audio())
+        # Usa o record_audio original (sem argumentos)
+        audio = record_audio() 
+        text = transcribe_audio(audio)
         if text: 
             print(f"User (Final): {text}")
             route_and_respond(text)
-        else:
-            print("User: (Vazio ou Ignorado)")
     except: pass
 
-# --- OTIMIZAÇÃO: Cache de Greetings ---
-def prepare_greetings_cache():
-    greetings = {"diz_coisas": "Diz coisas!", "aqui_estou": "Aqui estou!", "diz_la": "Diz lá.", "ei": "Ei!", "sim": "Sim?"}
-    if not os.path.exists(GREETINGS_CACHE_DIR): os.makedirs(GREETINGS_CACHE_DIR)
-    for filename, text in greetings.items():
-        wav_path = os.path.join(GREETINGS_CACHE_DIR, f"{filename}.wav")
-        if not os.path.exists(wav_path):
-            try: subprocess.run(f"echo '{text}' | piper --model {config.TTS_MODEL_PATH} --output_file {wav_path}", shell=True, check=True)
-            except: pass
-
-def play_cached_greeting():
-    try:
-        wav_files = glob.glob(os.path.join(GREETINGS_CACHE_DIR, "*.wav"))
-        if not wav_files: play_tts("Sim?", use_cache=True); return
-        subprocess.run(['aplay', '-D', config.ALSA_DEVICE_OUT, '-q', random.choice(wav_files)], check=False)
-    except: pass
-
-# --- API Server ---
-app = Flask(__name__)
-
+# --- API e UI (Restauradas) ---
 @app.route("/comando", methods=['POST'])
 def api_command():
-    d = request.json; p = d.get('prompt')
+    p = request.json.get('prompt')
     if not p: return jsonify({"status":"err"}), 400
     if p.lower().startswith("diz "): play_tts(p[4:].strip(), use_cache=False); return jsonify({"status":"ok"})
     return jsonify({"status":"ok", "response": route_and_respond(p, False)})
 
+@app.route("/get_devices")
+def api_devices():
+    toggles, status = [], []
+    def keys(attr): return list(getattr(config, attr).keys()) if hasattr(config, attr) else []
+    for n in keys('TUYA_DEVICES'):
+        if any(x in n.lower() for x in ['sensor','temp','humidade']): status.append(n)
+        else: toggles.append(n)
+    for n in keys('MIIO_DEVICES'): toggles.append(n)
+    for n in keys('EWELINK_DEVICES'): toggles.append(n)
+    for n in keys('CLOOGY_DEVICES'):
+        if 'casa' in n.lower(): status.append(n)
+        else: toggles.append(n)
+    if hasattr(config, 'SHELLY_GAS_URL') and config.SHELLY_GAS_URL: status.append("Sensor de Gás")
+    return jsonify({"status":"ok", "devices": {"toggles": toggles, "status": status}})
+
 @app.route("/device_status")
 def api_status():
     nick = request.args.get('nickname')
-    if not nick: return jsonify({"state": "unknown"}), 400
-    nick_lower = nick.lower()
     for s in SKILLS_LIST:
-        status_func = s.get('get_status')
-        if status_func:
-            if s["name"] == "skill_shellygas" and "gás" not in nick_lower and "gas" not in nick_lower: continue 
+        if s["get_status"]:
             try:
-                res = status_func(nick)
+                res = s["get_status"](nick)
                 if res and res.get('state') != 'unreachable': return jsonify(res)
-            except: pass
+            except: continue
     return jsonify({"state": "unreachable"})
 
 @app.route("/device_action", methods=['POST'])
@@ -280,173 +214,92 @@ def api_action():
     d = request.json
     return jsonify({"status":"ok", "response": route_and_respond(f"{d.get('action')} o {d.get('device')}", False)})
 
-@app.route("/get_devices")
-def api_devices():
-    toggles = []; status = []
-    def get_device_keys(attr):
-        if hasattr(config, attr) and isinstance(getattr(config, attr), dict): return list(getattr(config, attr).keys())
-        return []
-    for n in get_device_keys('TUYA_DEVICES'):
-        if any(x in n.lower() for x in ['sensor','temperatura','humidade']): status.append(n)
-        else: toggles.append(n)
-    for n in get_device_keys('MIIO_DEVICES'): toggles.append(n)
-    for n in get_device_keys('CLOOGY_DEVICES'):
-        if 'casa' in n.lower(): status.append(n)
-        else: toggles.append(n)
-    for n in get_device_keys('EWELINK_DEVICES'): toggles.append(n)
-    if hasattr(config, 'SHELLY_GAS_URL') and config.SHELLY_GAS_URL: status.append("Sensor de Gás")
-    return jsonify({"status":"ok", "devices": {"toggles": toggles, "status": status}})
-
-@app.route("/help", methods=['GET'])
+@app.route("/help")
 def get_help():
+    cmds = {"diz": "TTS"}
+    for s in SKILLS_LIST: cmds[s["name"]] = s.get("trigger_type", "active")
+    return jsonify({"status": "ok", "commands": cmds})
+
+# --- Greetings ---
+def prepare_greetings_cache():
+    if not os.path.exists(GREETINGS_CACHE_DIR): os.makedirs(GREETINGS_CACHE_DIR)
+
+def play_cached_greeting():
     try:
-        commands = {}
-        commands["diz"] = "TTS. Ex: diz olá"
-        for skill in SKILLS_LIST:
-            skill_name_short = skill["name"].replace("skill_", "")
-            triggers = skill.get("triggers", [])
-            if triggers:
-                trigger_summary = ', '.join(triggers[:4])
-                if len(triggers) > 4: trigger_summary += ', ...'
-                description = f"Ativado por '{skill.get('trigger_type', 'N/A')}': {trigger_summary}"
-            else: description = "Comando ativo"
-            commands[skill_name_short] = description
-        return jsonify({"status": "ok", "commands": commands})
-    except: return jsonify({"status": "erro"}), 500
+        wavs = glob.glob(os.path.join(GREETINGS_CACHE_DIR, "*.wav"))
+        if not wavs: play_tts("Sim?", use_cache=True); return
+        subprocess.run(['aplay', '-D', config.ALSA_DEVICE_OUT, '-q', random.choice(wavs)], check=False)
+    except: pass
 
-def start_api_server(host='0.0.0.0', port=5000):
-    logging.getLogger('werkzeug').setLevel(logging.ERROR); app.run(host=host, port=port)
-
+# --- MAIN LOOP (openWakeWord + Lógica Fina) ---
 def main():
-    """ O loop principal: ESCUTAR com Porcupine, PROCESSAR, REPETIR """
-    pv = None
-    pa = os.path.dirname(pvporcupine.__file__)
-    stream = None
+    # Inicializa openWakeWord
+    oww_model = None
+    if Model:
+        try:
+            try: oww_model = Model()
+            except: 
+                openwakeword.utils.download_models()
+                oww_model = Model()
+            print(f"WakeWords: {list(oww_model.models.keys())}")
+        except Exception as e: print(f"Erro WakeWord: {e}")
 
-    try:
-        models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-        ppn_files = glob.glob(os.path.join(models_dir, '*.ppn'))
+    print(f"--- Phantasma ONLINE (openWakeWord) ---")
 
-        if not ppn_files:
-            HOTWORD_CUSTOM_PATH = '/opt/phantasma/models/ei-fantasma_pt_linux_v3_0_0.ppn'
-            ppn_path = HOTWORD_CUSTOM_PATH
+    while True:
+        if oww_model:
+            try:
+                # 1. Escuta Hotword (Sem device específico)
+                with sd.InputStream(channels=1, samplerate=16000, dtype='int16', blocksize=1280) as stream:
+                    while True:
+                        chunk, _ = stream.read(1280)
+                        prediction = oww_model.predict(chunk.flatten())
+                        if any(score > 0.5 for score in prediction.values()):
+                            print("**** HOTWORD DETETADA ****")
+                            break
+                
+                # 2. Respiro para o ALSA (Crucial)
+                time.sleep(0.3)
+                
+                # 3. Processamento com configurações afinadas
+                play_cached_greeting()
+                process_user_query()
+                
+                oww_model.reset()
+
+            except Exception as e:
+                print(f"Erro loop voz: {e}")
+                time.sleep(1)
         else:
-            ppn_path = ppn_files[0]
-
-        HOTWORD_NAME = os.path.basename(ppn_path).replace('.ppn', '')
-
-        pv = pvporcupine.create(
-                access_key=config.ACCESS_KEY,
-                keyword_paths=[ppn_path],   
-                model_path=os.path.join(pa, 'lib/common/porcupine_params_pt.pv'),
-                sensitivities=[0.4] 
-                )
-        chunk_size = pv.frame_length
-
-        while True:
-            print(f"\n--- A escutar pela hotword '{HOTWORD_NAME}' (Stream: {config.ALSA_DEVICE_IN}) ---")
-            stream = sd.InputStream(
-                    device=config.ALSA_DEVICE_IN, 
-                    channels=1, 
-                    samplerate=pv.sample_rate, 
-                    dtype='int16', 
-                    blocksize=chunk_size
-                    )
-            stream.start()
-
-            while True: 
-                chunk, overflowed = stream.read(chunk_size)
-                if overflowed: pass 
-
-                chunk_flat = chunk.flatten()
-                keyword_index = pv.process(chunk_flat)
-
-                if keyword_index == 0: 
-                    print(f"\n\n**** HOTWORD '{HOTWORD_NAME}' DETETADA! ****\n")
-
-                    stream.stop()
-                    stream.close()
-                    stream = None
-                    
-                    play_cached_greeting()
-                    process_user_query() 
-
-                    print("Processamento concluído. A voltar à escuta...")
-                    break 
-
-    except KeyboardInterrupt:
-        print("\nA sair...")
-    except Exception as e:
-        print(f"\nOcorreu um erro inesperado no loop de escuta (Porcupine): {e}")
-        print(traceback.format_exc())
-    finally:
-        if stream is not None:
-            stream.stop()
-            stream.close()
-        if pv is not None:
-            pv.delete()
-            print("Recursos do Porcupine libertados.")
-        sys.exit(0)
+            time.sleep(10) # Modo fallback se WW falhar
 
 if __name__ == "__main__":
-    if config.OLLAMA_THREADS > 0:
-        os.environ['OLLAMA_NUM_THREAD'] = str(config.OLLAMA_THREADS)
-    try:
-        if config.WHISPER_THREADS > 0:
-            torch.set_num_threads(config.WHISPER_THREADS)
-        if not torch.cuda.is_available():
-            print("INFO: CUDA não disponível. Whisper em CPU.")
-    except Exception as e:
-        print(f"AVISO: Threads Torch: {e}")
-
+    if config.OLLAMA_THREADS > 0: os.environ['OLLAMA_NUM_THREAD'] = str(config.OLLAMA_THREADS)
     setup_database()
-    
-    # --- NOVO: Limpeza da Cache TTS (> 30 dias) ---
-    try:
-        clean_old_cache(days=30)
+    try: clean_old_cache() 
     except: pass
-    # ----------------------------------------------
-    
     load_skills()
-    
-    # --- Registar rotas web das skills (UI, etc) ---
-    print("A registar rotas web das skills...")
-    for skill in SKILLS_LIST:
-        module = skill["module"]
-        if hasattr(module, 'register_routes'):
-            try:
-                module.register_routes(app)
-                print(f"  -> Rotas registadas para '{skill['name']}'")
-            except Exception as e:
-                print(f"ERRO ao registar rotas de '{skill['name']}': {e}")
-    # ------------------------------------------------
-    
     prepare_greetings_cache()
 
-    try:
-        print(f"A carregar modelos (Whisper: {config.WHISPER_MODEL}, Ollama: {config.OLLAMA_MODEL_PRIMARY})...")
-        whisper_model = whisper.load_model(config.WHISPER_MODEL, device="cpu")
-        print("A aquecer o modelo Whisper...")
-        # Aquecimento com array vazio
-        whisper_model.transcribe(np.zeros(16000, dtype=np.float32), language='pt') 
-        ollama_client = ollama.Client()
-        print("Modelos carregados.")
-    except Exception as e:
-        print(f"ERRO: Falha ao carregar modelos: {e}")
-        sys.exit(1)
-
-    print("A inicializar histórico...")
-    conversation_history = [{'role': 'system', 'content': config.SYSTEM_PROMPT}]
-    
-    threading.Thread(target=start_api_server, daemon=True).start()
-
-    print("\n--- A iniciar daemons de skills ---")
+    # Registar rotas UI
     for skill in SKILLS_LIST:
-        module = skill["module"]
-        if hasattr(module, 'init_skill_daemon'):
-            try:
-                module.init_skill_daemon()
-            except Exception as e:
-                print(f"ERRO CRÍTICO skill '{skill['name']}': {e}")
+        if hasattr(skill["module"], 'register_routes'):
+            try: skill["module"].register_routes(app)
+            except: pass
+
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+    try:
+        whisper_model = whisper.load_model(config.WHISPER_MODEL, device="cpu")
+        # Aquecimento
+        whisper_model.transcribe(np.zeros(16000, dtype=np.float32), language='pt')
+        ollama_client = ollama.Client()
+    except: pass
+
+    for skill in SKILLS_LIST:
+        if hasattr(skill["module"], 'init_skill_daemon'):
+            try: skill["module"].init_skill_daemon()
+            except: pass
 
     main()

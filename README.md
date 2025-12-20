@@ -2,11 +2,11 @@
 
 Phantasma é um assistente de voz local-first (offline) e modular, construído em Python. Ele foi desenhado para ser privado, correndo inteiramente no teu próprio servidor, sem depender de serviços de nuvem de terceiros (exceto para pesquisas na web, que são feitas através da tua própria instância do SearxNG).
 
-Ele usa `pvporcupine` para a deteção da *hotword* ("olá fantasma"), `whisper` para transcrição, `ollama` (Llama3) como cérebro, e `piper`/`sox` para uma voz robótica personalizada.
+Ele usa `openwakeword` para a deteção da *hotword*, `whisper` para transcrição, `ollama` (Llama3) como cérebro, e `piper`/`sox` para uma voz robótica personalizada.
 
 ## Funcionalidades
 
-* **Hotword 100% Offline:** Usa o `pvporcupine` para uma deteção de *hotword* ("olá fantasma") mais fiável com menos falsos positivos. Ainda assim foi aplicada uma função de VAD para verificar primeiro por atividade de voz para evitar ativações noturnas ou acidentais baseada em webrtcvad.
+* **Hotword 100% Offline:** Usa o `openwakeword` para uma deteção de *hotword*. Foi aplicada uma função de VAD para verificar primeiro por atividade de voz para evitar ativações noturnas ou acidentais baseada em webrtcvad.
 * **Transcrição Local:** Utiliza o `whisper` (modelo `medium`) para transcrição de voz para texto.
 * **Cérebro Local (LLM):** Integrado com o `ollama` para usar o modelo `llama3:8b-instruct-8k`.
 * **Voz Robótica (TTS):** Usa o `piper` com efeitos do `sox` para criar a voz do assistente.
@@ -24,7 +24,7 @@ Ele usa `pvporcupine` para a deteção da *hotword* ("olá fantasma"), `whisper`
 
 | Componente | Tecnologia Utilizada | Propósito |
 | :--- | :--- | :--- |
-| **Hotword** | `pvporcupine` (Picovoice) | Deteção "pHantasma" offline. |
+| **Hotword** | `openwakeword` | Deteção offline. |
 | **STT (Voz->Texto)** | `openai-whisper` (Medium) | Transcrição local. |
 | **LLM (Cérebro)** | `ollama` (Llama3 8K) | Processamento de linguagem. |
 | **TTS (Texto->Voz)** | `piper` + `sox` | Geração de voz. |
@@ -40,7 +40,7 @@ Ele usa `pvporcupine` para a deteção da *hotword* ("olá fantasma"), `whisper`
 
 ### 1. Pré-requisitos (Sistema)
 
-Assume-se um servidor Ubuntu/Debian. Estes pacotes são necessários para o áudio e para o `pvporcupine`.
+Assume-se um servidor Ubuntu/Debian. Estes pacotes são necessários.
 sudo apt update
 sudo apt install sox mpg123 portaudio19-dev
 
@@ -84,7 +84,7 @@ source venv/bin/activate
 
 #### Instala tudo no venv 3.11.9
 pip install --upgrade pip
-pip install sounddevice openai-whisper ollama torch httpx flask pvporcupine dio-chacon-wifi-api tinytuya psutil python-miio webrtcvad
+pip install sounddevice openai-whisper ollama torch httpx flask openwakeword dio-chacon-wifi-api tinytuya psutil python-miio webrtcvad
 
 ## Configuração
 
@@ -312,8 +312,33 @@ Este *core* (e a sua arquitetura *skill*) é o motor que traduz o comando de uti
 * **Falha de Ligação (Tuya/Miio):** Quase sempre devido a uma falha na **Reserva de DHCP** (o IP do dispositivo mudou) ou a um **Token/Chave Local** incorreto. Verifique a tabela de DHCP do seu *router* e volte a extrair as chaves se necessário.
 * **Controlo Não Funciona:** Verifique se as dependências (`tinytuya`, `python-miio`) estão instaladas no ambiente virtual ativo e se o `phantasma_core.py` está a ser executado.
 
+## 🎤 Hotword (openWakeWord)
+
+O Phantasma migrou do `pvporcupine` para o **openWakeWord** para garantir uma operação **100% livre, offline e perpétua**, eliminando a dependência de chaves de API externas ou licenças que expiram.
+
+### Porquê openWakeWord?
+
+* **Zero Dependências de Cloud:** Não requer registo em serviços de terceiros (como a Picovoice) nem chaves de acesso (`ACCESS_KEY`).
+* **Privacidade Total:** Todo o processamento de áudio é feito localmente no CPU.
+* **Modelos Gratuitos:** Inclui vários modelos pré-treinados de alta qualidade prontos a usar.
+
+### Modelos Disponíveis
+
+O sistema vem configurado para carregar automaticamente os modelos incluídos na biblioteca. Podes ativar o assistente dizendo qualquer uma das seguintes palavras:
+
+* **"Hey Jarvis"** (Padrão recomendado)
+* **"Alexa"**
+* **"Hey Mycroft"**
+* **"Hey Rhasspy"**
+
+### Configuração
+
+A deteção é gerida no ficheiro `assistant.py`. Atualmente, o sistema carrega todos os modelos pré-treinados disponíveis para garantir a máxima flexibilidade.
+
+Para treinar uma *hotword* personalizada (ex: "Ei Fantasma"), é necessário treinar um novo modelo `.onnx` (o openWakeWord não é compatível com os ficheiros `.ppn` antigos do Porcupine).
+
+
 ### Notas finais:
-Estava previsto usar o sistema para hotwords que não tinha o requisito de necessitar de uma licença como com o openwakeword, mas era ter falso-positivos com a palavra OH, ou ter o modelo completamente surdo com qualquer outra palavra, acabei por acatar e seguir com o pvporcupine, que irá necessitar da ativação de uma chave (gratuito para um dispositivo).
 O código deste modelo e até idealização do projeto, e até mesmo este readme é fortemente gerado pelo Google Gemini.
 Como equipamento, estou a usar um HP Mini G4, com 16GB de RAM e um Jabra SPEAK 410 como dispositivo de audio.
 
@@ -323,6 +348,5 @@ O código-fonte deste projeto (os ficheiros `.py`, `.sh`, etc.) é licenciado so
 
 Este projeto depende de *software* de terceiros com as suas próprias licenças, incluindo:
 
-* **pvporcupine (Picovoice):** Esta é uma biblioteca proprietária. A sua utilização está sujeita aos termos de serviço da Picovoice e requer uma `ACCESS_KEY` pessoal.
 * **Ollama (MIT)**
 * **OpenAI Whisper (MIT)**
