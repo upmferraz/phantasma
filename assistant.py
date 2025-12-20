@@ -152,7 +152,7 @@ def route_and_respond(user_prompt, speak_response=True):
                 conversation_history.append({'role': 'assistant', 'content': cached_text})
             
             if llm_response is None:
-                if speak_response: play_tts(random.choice(["Deixa-me pensar...", "Um segundo."]), use_cache=True)
+                if speak_response: play_tts(random.choice(["Deixa-me pensar...", "hmm..."]), use_cache=True)
                 llm_response = process_with_ollama(prompt=user_prompt)
                 if llm_response: save_cached_response(user_prompt, llm_response)
 
@@ -247,8 +247,12 @@ def main():
             print(f"WakeWords ativas: {list(oww_model.models.keys())}")
         except Exception as e: print(f"Erro WakeWord: {e}")
 
-    print(f"--- Phantasma ONLINE (openWakeWord) ---")
+    print(f"--- Phantasma ONLINE (Modo Adaptativo) ---")
 
+    # Configurações de Adaptação
+    BASE_THRESHOLD = config.WAKEWORD_CONFIDENCE # Valor base (ex: 0.45)
+    NOISE_LIMIT = 500  # Nível de volume considerado "Barulho de Fundo" (ajustável)
+    
     while True:
         if oww_model:
             try:
@@ -256,28 +260,51 @@ def main():
                 with sd.InputStream(channels=1, samplerate=16000, dtype='int16', blocksize=1280) as stream:
                     while True:
                         chunk, _ = stream.read(1280)
-                        prediction = oww_model.predict(chunk.flatten())
                         
-                        # Verifica qual disparou e com que confiança
+                        # --- CÁLCULO DE ENERGIA (RUÍDO) ---
+                        # Converter para float para calcular RMS (Root Mean Square)
+                        chunk_float = chunk.flatten().astype(np.float32)
+                        rms = np.sqrt(np.mean(chunk_float**2))
+                        
+                        # --- LÓGICA DINÂMICA ---
+                        current_threshold = BASE_THRESHOLD
+                        
+                        # Se houver muito barulho (TV), somos mais exigentes
+                        if rms > NOISE_LIMIT:
+                            current_threshold = 0.75 # Muito exigente
+                            status_ruido = "(Ruído Alto -> Exigente)"
+                        else:
+                            current_threshold = BASE_THRESHOLD # Normal
+                            status_ruido = ""
+
+                        # Predição
+                        prediction = oww_model.predict(chunk.flatten())
                         best_model = max(prediction, key=prediction.get)
                         best_score = prediction[best_model]
 
-                        # Usa o valor do config.py
-                        if best_score > config.WAKEWORD_CONFIDENCE:
-                            print(f"\n**** HOTWORD DETETADA: '{best_model}' ({best_score:.2f}) ****")
-                            break
-                
-                # 2. Respiro ALSA
-                time.sleep(0.3)
-                
-                # 3. Processamento
-                play_cached_greeting()
-                process_user_query()
-                
-                oww_model.reset()
+                        # --- DEBUG VISUAL (Opcional, comenta depois) ---
+                        # Mostra o volume atual e o score se for relevante
+                        # if best_score > 0.1 or rms > 1000:
+                        #    print(f"\rVol: {int(rms)} | Score: {best_score:.2f} | Meta: {current_threshold} {status_ruido}", end='', flush=True)
+
+                        # Verifica ativação com o limiar dinâmico
+                        if best_score > current_threshold:
+                            print(f"\n\n**** ATIVADO: '{best_model}' (Score: {best_score:.2f} | Ruído: {int(rms)}) ****")
+                            
+                            # 2. Respiro ALSA
+                            stream.stop()
+                            stream.close()
+                            time.sleep(0.3)
+                            
+                            # 3. Processamento
+                            play_cached_greeting()
+                            process_user_query()
+                            
+                            oww_model.reset()
+                            break 
 
             except Exception as e:
-                print(f"Erro loop voz: {e}")
+                print(f"\nErro loop voz: {e}")
                 time.sleep(1)
         else:
             time.sleep(10)
