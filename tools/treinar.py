@@ -12,163 +12,162 @@ from tqdm import tqdm
 
 # --- CONFIGURAÇÃO ---
 NOME_MODELO = "hey_fantasma"
-PASTA_POSITIVOS = "meus_samples_limpos"  # A tua pasta nova limpa
-PASTA_NEGATIVOS = "meus_negativos"     
-PASTA_MODELOS = "meus_modelos_finais"
+PASTA_POSITIVOS = "meus_samples_limpos"   # Onde estão os teus "Hey Fantasma" gravados
+PASTA_NEGATIVOS = "meus_negativos"      # Onde estão os ruídos de fundo (opcional se usares o .npy)
+OUTPUT_DIR = "meus_modelos_finais"
 
-# Link atualizado (davidscripka) e User-Agent para tentar evitar erro 401
-URL_NEGATIVOS = "https://huggingface.co/davidscripka/openwakeword/resolve/main/validation_set_embeddings.npy"
-STACK_SIZE = 16 
+# Link do dataset gigante de validação (útil para robustez extra)
+URL_GENERICOS = "https://huggingface.co/davidscripka/openwakeword/resolve/main/validation_set_embeddings.npy"
 
-def get_melspectrogram_model_path():
+# Parâmetros Técnicos (Não mexer a não ser que saibas o que fazes)
+STACK_SIZE = 16  # Quantos frames de áudio o modelo vê de uma vez (aprox 1.2s)
+
+# --- 1. PREPARAÇÃO DO MOTOR ---
+def get_melspectrogram_model():
+    """Carrega o modelo que converte som em imagens (features)"""
     base_path = os.path.dirname(openwakeword.__file__)
     model_path = os.path.join(base_path, "resources", "models", "melspectrogram.onnx")
-    if not os.path.exists(model_path): raise FileNotFoundError(f"ONNX missing: {model_path}")
-    return model_path
+    sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+    return sess
 
-def read_wav_manually(file_path):
-    try:
-        with wave.open(file_path, 'rb') as wf:
-            frames = wf.readframes(wf.getnframes())
-            return np.frombuffer(frames, dtype=np.int16)
-    except: return None
-
-def process_wav_to_features(session, audio_data, input_name):
-    try:
-        input_tensor = audio_data.astype(np.float32) / 32768.0
-        input_tensor = input_tensor[None, :] 
-        outputs = session.run(None, {input_name: input_tensor})
-        return outputs[0].squeeze()
-    except: return None
-
-def window_features(features, stack_size=16):
-    if features is None or features.ndim != 2: return []
-    if features.shape[0] < stack_size: return []
-    windows = []
-    for i in range(features.shape[0] - stack_size + 1):
-        block = features[i : i + stack_size]
-        windows.append(block.flatten())
-    return windows
-
-def download_generic_negatives():
-    neg_file = "negatives.npy"
-    if os.path.exists(neg_file) and os.path.getsize(neg_file) > 1024:
-        return neg_file
-
-    print("⬇️ A tentar baixar dataset genérico (correção de link)...")
-    try:
-        # User-Agent finge ser um browser para evitar bloqueio 401
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(URL_NEGATIVOS, headers=headers, stream=True, timeout=15)
+def audio_to_features(audio_data, sess):
+    """Transforma áudio RAW em vetores matemáticos para o treino"""
+    # Normalizar
+    if audio_data.dtype == np.int16:
+        audio_data = audio_data.astype(np.float32) / 32768.0
+    
+    # 1. Obter Mel Spectrogram
+    mel = sess.run(None, {'input': audio_data[None, :]})[0].squeeze()
+    
+    features = []
+    # 2. Criar janelas deslizantes (Sliding Windows)
+    for i in range(0, len(mel) - STACK_SIZE + 1):
+        window = mel[i : i + STACK_SIZE]
+        features.append(window.flatten())
         
-        if r.status_code == 200:
-            with open(neg_file, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print("✅ Download com sucesso!")
-            return neg_file
-        else:
-            print(f"⚠️ Falha no download ({r.status_code}). Vamos usar apenas os teus negativos.")
-            return None
-    except Exception as e:
-        print(f"⚠️ Erro de rede: {e}. A usar negativos locais.")
+    return np.array(features)
+
+def carregar_positivos(sess):
+    print(f"🎤 A carregar positivos de '{PASTA_POSITIVOS}'...")
+    wavs = glob.glob(os.path.join(PASTA_POSITIVOS, "*.wav"))
+    features_list = []
+    
+    if not wavs:
+        print("❌ ERRO: Nenhuns ficheiros .wav encontrados na pasta de positivos!")
         return None
 
-def main():
-    if not os.path.exists(PASTA_POSITIVOS):
-        print(f"❌ ERRO: Pasta '{PASTA_POSITIVOS}' não existe.")
-        return
-
-    os.makedirs(PASTA_MODELOS, exist_ok=True)
-    
-    print("🧠 A carregar motor de features...")
-    model_path = get_melspectrogram_model_path()
-    session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-    input_name = session.get_inputs()[0].name
-    
-    # --- 1. POSITIVOS ---
-    print(f"🎤 A processar POSITIVOS de '{PASTA_POSITIVOS}'...")
-    wav_files = glob.glob(os.path.join(PASTA_POSITIVOS, "*.wav"))
-    X_pos_list = []
-    
-    for wav_path in tqdm(wav_files):
-        audio = read_wav_manually(wav_path)
-        if audio is not None and len(audio) > 1600:
-            feat = process_wav_to_features(session, audio, input_name)
-            X_pos_list.extend(window_features(feat, STACK_SIZE))
-            
-    if not X_pos_list: 
-        print("⛔ Falha: Sem dados positivos.")
-        return
-    
-    X_pos = np.vstack(X_pos_list)
-    y_pos = np.ones(X_pos.shape[0])
-
-    # --- 2. NEGATIVOS ---
-    X_neg_list = []
-    
-    # A) LOCAIS (Crucial!)
-    if os.path.exists(PASTA_NEGATIVOS):
-        neg_files = glob.glob(os.path.join(PASTA_NEGATIVOS, "*.wav"))
-        print(f"🔇 A processar {len(neg_files)} ficheiros de NEGATIVOS locais...")
-        for wav_path in tqdm(neg_files):
-            audio = read_wav_manually(wav_path)
-            if audio is not None and len(audio) > 1600:
-                feat = process_wav_to_features(session, audio, input_name)
-                windows = window_features(feat, STACK_SIZE)
-                X_neg_list.extend(windows)
-
-    # B) GENÉRICOS (Opcional mas recomendado)
-    neg_npy = download_generic_negatives()
-    if neg_npy and os.path.exists(neg_npy):
+    for wav in tqdm(wavs):
         try:
-            print("📦 A misturar negativos genéricos...")
-            data_neg = np.load(neg_npy, allow_pickle=True).item()
-            X_neg_raw = data_neg['X']
-            
-            # Pega numa quantidade segura para não abafar os teus dados
-            # Se tiveres poucos locais, usamos mais genéricos
-            qtd_locais = len(X_neg_list)
-            qtd_genericos = max(2000, qtd_locais * 2) 
-            qtd_genericos = min(len(X_neg_raw), qtd_genericos)
+            with wave.open(wav, 'rb') as wf:
+                frames = wf.readframes(wf.getnframes())
+                audio = np.frombuffer(frames, dtype=np.int16)
+                feats = audio_to_features(audio, sess)
+                if len(feats) > 0:
+                    features_list.append(feats)
+        except Exception as e:
+            print(f"⚠️ Ignorado {wav}: {e}")
 
-            idx = np.random.choice(len(X_neg_raw), qtd_genericos, replace=False)
-            X_neg_list.extend(list(X_neg_raw[idx]))
-        except: pass
+    if features_list:
+        return np.vstack(features_list)
+    return None
 
-    if not X_neg_list:
-        print("❌ ERRO FATAL: Sem negativos nenhuns.")
-        print("👉 Grava barulho de TV/Música com o 'grava_negativos.py'!")
-        return
+def carregar_negativos():
+    """
+    Lógica de prioridade para carregar negativos:
+    1. 'negativos_local.npy' (Gerado pelo teu script compactar) -> Mais Rápido e Personalizado
+    2. 'negatives.npy' (Dataset Genérico da Internet) -> Bom para encher chouriços
+    """
+    neg_features = []
+    
+    # OPÇÃO A: O Teu Ficheiro Compactado (RÁPIDO)
+    if os.path.exists("negativos_local.npy"):
+        print("⚡ Encontrado 'negativos_local.npy'. A carregar...")
+        local_data = np.load("negativos_local.npy")
+        neg_features.append(local_data)
+        
+    # OPÇÃO B: O Dataset Genérico (WEB)
+    # Se não existir localmente, tenta baixar
+    if not os.path.exists("negatives.npy"):
+        print("🌐 A baixar dataset genérico de validação (aprox 100MB)...")
+        try:
+            r = requests.get(URL_GENERICOS, allow_redirects=True)
+            with open("negatives.npy", 'wb') as f:
+                f.write(r.content)
+        except:
+            print("⚠️ Falha ao baixar negativos genéricos. Ignorando.")
 
-    X_neg = np.vstack(X_neg_list)
-    y_neg = np.zeros(X_neg.shape[0])
+    if os.path.exists("negatives.npy"):
+        print("📦 A carregar dataset genérico...")
+        gen_data = np.load("negatives.npy")
+        # Usamos uma amostra aleatória para não usar 100% da RAM se for gigante
+        # Mas queremos bastantes. Vamos tentar usar 50.000 se houver.
+        if len(gen_data) > 50000:
+            idx = np.random.choice(len(gen_data), 50000, replace=False)
+            neg_features.append(gen_data[idx])
+        else:
+            neg_features.append(gen_data)
 
-    # --- 3. TREINO ---
+    if not neg_features:
+        print("❌ ERRO FATAL: Sem dados negativos!")
+        print("👉 Corre o 'compactar_negativos.py' primeiro ou verifica a internet.")
+        return None
+        
+    return np.vstack(neg_features)
+
+# --- FUNÇÃO PRINCIPAL ---
+def main():
+    if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
+    
+    # 1. Iniciar Sessão ONNX
+    sess = get_melspectrogram_model()
+
+    # 2. Carregar Dados
+    X_pos = carregar_positivos(sess)
+    if X_pos is None: return
+    
+    X_neg = carregar_negativos()
+    if X_neg is None: return
+
+    # Criar Labels (1 = Fantasma, 0 = Lixo)
+    y_pos = np.ones(len(X_pos))
+    y_neg = np.zeros(len(X_neg))
+
+    # Juntar tudo
     X = np.vstack((X_pos, X_neg))
     y = np.concatenate((y_pos, y_neg))
-    
-    print(f"⚔️  A treinar: {len(X_pos)} Positivos vs {len(X_neg)} Negativos")
-    
-    # Aumentei o max_iter para 5000 para acabar com o aviso de convergência
+
+    print(f"\n⚔️  A TREINAR: {len(X_pos)} Positivos vs {len(X_neg)} Negativos")
+    print(f"⚖️  Proporção: 1 para {len(X_neg)/len(X_pos):.1f}")
+
+    # 3. Treinar Modelo (Regressão Logística)
+    # class_weight='balanced' é CRUCIAL para lidar com a diferença de quantidade
     clf = LogisticRegression(class_weight='balanced', max_iter=5000, C=0.1)
     clf.fit(X, y)
-    
-    score = clf.score(X, y)
-    print(f"🎯 Score Final: {score:.4f}")
-    
-    if score == 1.0 and len(X_neg) < 1000:
-        print("⚠️ PERIGO: Score 1.0 com poucos negativos = Overfitting garantido.")
-    elif score > 0.999:
-        print("ℹ️ Score muito alto. Se falhar, grava mais ruído de fundo.")
 
-    # --- 4. EXPORTAR ---
-    initial_type = [('input_1', FloatTensorType([None, X.shape[1]]))]
-    onx = to_onnx(clf, X[:1].astype(np.float32), initial_types=initial_type, options={'zipmap': False})
+    # 4. Avaliar
+    score = clf.score(X, y)
+    print(f"🎯 Score (Precisão Matemática): {score:.4f}")
     
-    out_path = os.path.join(PASTA_MODELOS, f"{NOME_MODELO}.onnx")
-    with open(out_path, "wb") as f: f.write(onx.SerializeToString())
-    print(f"✅ Modelo salvo: {out_path}")
+    if score == 1.0:
+        print("⚠️  AVISO: Score perfeito (1.0) pode indicar overfitting.")
+        print("    Testa o modelo na vida real. Se falhar muito, precisas de mais negativos difíceis.")
+
+    # 5. Exportar para ONNX
+    print(f"💾 A converter para ONNX...")
+    
+    # Definir o tipo de entrada (Vector de floats com tamanho STACK_SIZE * 32 mels = 512)
+    initial_type = [('float_input', FloatTensorType([None, 512]))]
+    
+    # Converter
+    onnx_model = to_onnx(clf, initial_types=initial_type, target_opset=12)
+    
+    # Salvar
+    output_path = os.path.join(OUTPUT_DIR, f"{NOME_MODELO}.onnx")
+    with open(output_path, "wb") as f:
+        f.write(onnx_model.SerializeToString())
+
+    print(f"\n✅ SUCESSO! Modelo guardado em:\n   -> {output_path}")
+    print("\n👉 Para usar, atualiza o teu assistant.py para apontar para este ficheiro.")
 
 if __name__ == "__main__":
     main()
