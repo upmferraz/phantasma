@@ -124,31 +124,37 @@ def _set_state(device_id, state_on):
 
 def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'CLOOGY_DEVICES'): return None
-    
+
     target_id = None; target_name = ""
     for name, dev_id in config.CLOOGY_DEVICES.items():
         if name.lower() in user_prompt_lower: target_id = dev_id; target_name = name; break
-            
+
     if not target_id and any(x in user_prompt_lower for x in ["casa", "geral", "total"]):
          tid_str = _find_id_by_name("casa")
          if tid_str: target_id = tid_str; target_name = "casa"
 
     if not target_id: return None
 
+    # 1. Leitura de Consumo
     if any(x in user_prompt_lower for x in ["quanto", "consumo", "leitura", "gastar"]):
         val = _fetch_reading(target_id)
         if val is None:
             cache = _load_cache()
             if str(target_id) in cache: val = cache[str(target_id)]["val"]
-        
+
         if val is not None:
             _update_single_value(target_id, val)
             return f"O consumo atual é de {int(val)} Watts."
         return f"Não consegui ler o sensor {target_name}."
 
+    # 2. Controlo (Ligar / Desligar)
     is_on = any(x in user_prompt_lower for x in ["liga", "acende"])
     is_off = any(x in user_prompt_lower for x in ["desliga", "apaga"])
-    if is_on: return f"Ok." if _set_state(target_id, True) else "Erro."
-    elif is_off: return f"Ok." if _set_state(target_id, False) else "Erro."
-    
+
+    # FIX: Prioridade ao DESLIGAR para evitar conflito de string ("desliga" contém "liga")
+    if is_off:
+        return f"Ok." if _set_state(target_id, False) else "Erro."
+    elif is_on:
+        return f"Ok." if _set_state(target_id, True) else "Erro."
+
     return None

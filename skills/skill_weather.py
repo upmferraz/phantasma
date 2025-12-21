@@ -11,7 +11,7 @@ from datetime import datetime
 
 # --- Configuração ---
 TRIGGER_TYPE = "contains"
-TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "qualidade do ar", "lua"]
+TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "está frio", "está calor", "qualidade do ar", "lua"]
 
 CACHE_FILE = "/opt/phantasma/cache/weather_cache.json"
 POLL_INTERVAL = 1800  # 30 minutos

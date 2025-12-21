@@ -46,8 +46,11 @@ def handle(user_prompt_lower, user_prompt_full):
 def get_status_for_device(nickname):
     """ 
     Retorna o estado para o dashboard web. 
-    O 'nickname' é ignorado porque só temos um Shelly Gas no config. 
     """
+    # 1. VALIDAÇÃO: Se não perguntaram pelo gás, ignorar (retorna unreachable)
+    if "gás" not in nickname.lower() and "gas" not in nickname.lower():
+        return {"state": "unreachable"}
+
     if not hasattr(config, 'SHELLY_GAS_URL') or not config.SHELLY_GAS_URL:
         return {"state": "unreachable"}
 
