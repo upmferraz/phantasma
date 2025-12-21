@@ -308,6 +308,8 @@ def api_devices():
     for n in keys('CLOOGY_DEVICES'):
         if 'casa' in n.lower(): status.append(n)
         else: toggles.append(n)
+    if hasattr(config, 'SHELLY_GAS_URL') and config.SHELLY_GAS_URL:
+        status.append("Sensor de Gás")
     return jsonify({"status":"ok", "devices": {"toggles": toggles, "status": status}})
 
 @app.route("/device_status")
