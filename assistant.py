@@ -18,28 +18,27 @@ from flask import Flask, request, jsonify
 from collections import deque
 import sounddevice as sd
 import onnxruntime as ort
-from datetime import datetime  # <--- A LINHA QUE FALTAVA
+from datetime import datetime
 
 # --- CONFIGURAÇÕES DE AFINAÇÃO ---
-DEBUG_MODE = False         # False = Logs limpos
+DEBUG_MODE = False         
 WAKEWORD_THRESHOLD = 0.85 
 TRIGGER_PERSISTENCE = 4    
 WARMUP_SECONDS = 2        
 
 # --- HORÁRIO SILENCIOSO (Modo Noturno) ---
-QUIET_START = 23  # Começa às 23
-QUIET_END = 8     # Acaba às 08:00
+QUIET_START = 23  # 23:00
+QUIET_END = 8     # 08:00
 
-# --- GLOBAIS DE CONTROLO DE FLUXO (BARGE-IN) ---
+# --- GLOBAIS DE CONTROLO ---
 CURRENT_REQUEST_ID = None  
 IS_SPEAKING = False        
 
-# --- MÓDULOS EXTERNOS (Config e Utils) ---
+# --- MÓDULOS EXTERNOS ---
 import config
 try:
     from audio_utils import *
 except ImportError:
-    # Fallback se faltar audio_utils
     def play_tts(text, use_cache=False): print(f"[TTS]: {text}")
     def record_audio(): return np.zeros(16000, dtype=np.int16)
     def clean_old_cache(): pass
@@ -84,7 +83,6 @@ class PhantasmaEngine:
 
     def predict(self, audio_chunk_int16):
         if not self.ready: return 0.0
-        # Filtro de Ruído Elétrico
         if np.sqrt(np.mean(audio_chunk_int16.astype(float)**2)) < 300: return 0.0
         try:
             audio_tensor = audio_chunk_int16.astype(np.float32) / 32768.0
@@ -124,20 +122,17 @@ WHISPER_HALLUCINATIONS = [
 def is_hallucination(text):
     if not text or len(text.strip()) < 2: return True
     if text.strip() in WHISPER_HALLUCINATIONS: return True
-    # Deteta Cirílico (Bug comum do Whisper)
     if re.search(r'[а-яА-Я]', text): return True
     return False
 
 def is_quiet_time():
-    """Retorna True se estivermos no horário de silêncio."""
     now = datetime.now().hour
     if QUIET_START > QUIET_END:
         return now >= QUIET_START or now < QUIET_END
     return QUIET_START <= now < QUIET_END
 
-# --- FUNÇÕES DE CONTROLO (Barge-in) ---
+# --- FUNÇÕES DE CONTROLO ---
 def stop_audio_output():
-    """Mata processos de áudio"""
     global IS_SPEAKING
     IS_SPEAKING = False
     try:
@@ -154,7 +149,7 @@ def safe_play_tts(text, use_cache=False, request_id=None, speak=True):
     play_tts(text, use_cache=use_cache)
     IS_SPEAKING = False
 
-# --- SKILLS ---
+# --- SKILLS (Corrigido para guardar Triggers) ---
 def load_skills():
     global SKILLS_LIST
     print("A carregar skills...")
@@ -178,6 +173,7 @@ def load_skills():
                 "name": skill_name, 
                 "handle": getattr(module, 'handle', None),
                 "trigger_type": getattr(module, 'TRIGGER_TYPE', 'contains'),
+                "triggers": raw_triggers,  # <--- RESTAURADO: Lista original de comandos
                 "triggers_lower": triggers_lower,
                 "module": module,
                 "get_status": getattr(module, 'get_status_for_device', None)
@@ -211,22 +207,36 @@ def transcribe_audio(audio_data):
             print(f"⚠️ Alucinação ignorada: {text}")
             return ""
 
-        # Correções Fonéticas
         if hasattr(config, 'PHONETIC_FIXES') and text:
             for mistake, correction in config.PHONETIC_FIXES.items():
                 if mistake.lower() in text.lower():
                     pattern = re.compile(re.escape(mistake), re.IGNORECASE)
                     text = pattern.sub(correction, text)
-
         return text
     except: return ""
 
 # --- ROTEAMENTO INTELIGENTE ---
-def route_and_respond(user_prompt, my_request_id, speak=True):
-    global conversation_history
+def route_and_respond(user_prompt, my_request_id="API_REQ", speak=True):
+    """
+    Lógica central de decisão.
+    Correção: 'API_REQ' agora tem permissão para sobrescrever o ID atual.
+    """
+    global conversation_history, CURRENT_REQUEST_ID
     
     try:
-        if my_request_id != CURRENT_REQUEST_ID: return
+        # --- LÓGICA DE PRIORIDADE API ---
+        # Se o pedido vier da UI ou Discord, ele "manda" na casa.
+        # Atualizamos o ID Global para que este pedido seja considerado o válido.
+        if my_request_id == "API_REQ":
+            CURRENT_REQUEST_ID = "API_REQ"
+            # Se o assistente estiver a falar de uma resposta de voz anterior, calamo-lo.
+            stop_audio_output() 
+        
+        # --- VERIFICAÇÃO DE SEGURANÇA (Barge-in) ---
+        # Se depois da lógica acima os IDs ainda não baterem certo, é lixo antigo.
+        elif my_request_id != CURRENT_REQUEST_ID: 
+            return
+
         user_prompt_lower = user_prompt.lower()
         
         # 1. Skills
@@ -240,7 +250,9 @@ def route_and_respond(user_prompt, my_request_id, speak=True):
                 print(f"Skill: {skill['name']}")
                 resp = skill["handle"](user_prompt_lower, user_prompt)
                 
+                # Check de Interrupção
                 if my_request_id != CURRENT_REQUEST_ID: return
+                
                 if resp: 
                     final_txt = resp.get("response", "") if isinstance(resp, dict) else resp
                     safe_play_tts(final_txt, use_cache=False, request_id=my_request_id, speak=speak)
@@ -254,11 +266,14 @@ def route_and_respond(user_prompt, my_request_id, speak=True):
 
         # 3. LLM + RAG
         safe_play_tts("Deixa-me pensar...", use_cache=True, request_id=my_request_id, speak=speak)
+        
+        # Check de Interrupção (Antes do trabalho pesado)
         if my_request_id != CURRENT_REQUEST_ID: return
 
         rag_res, web_res = retrieve_from_rag(user_prompt), search_with_searxng(user_prompt)
         full_prompt = f"{web_res}\n{rag_res}\nPERGUNTA: {user_prompt}"
         
+        # Check de Interrupção (Antes do Ollama)
         if my_request_id != CURRENT_REQUEST_ID: return
         
         temp_history = conversation_history.copy()
@@ -267,6 +282,7 @@ def route_and_respond(user_prompt, my_request_id, speak=True):
         resp = ollama_client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=temp_history)
         content = resp['message']['content']
         
+        # Check Final
         if my_request_id != CURRENT_REQUEST_ID: return
 
         conversation_history.append({'role': 'user', 'content': full_prompt})
@@ -300,16 +316,23 @@ def api_command():
 def api_devices():
     toggles, status = [], []
     def keys(attr): return list(getattr(config, attr).keys()) if hasattr(config, attr) else []
+    
+    # Tuya
     for n in keys('TUYA_DEVICES'):
         if any(x in n.lower() for x in ['sensor','temp','humidade']): status.append(n)
         else: toggles.append(n)
+    
+    # Outros
     for n in keys('MIIO_DEVICES'): toggles.append(n)
     for n in keys('EWELINK_DEVICES'): toggles.append(n)
     for n in keys('CLOOGY_DEVICES'):
         if 'casa' in n.lower(): status.append(n)
         else: toggles.append(n)
+
+    # Shelly Gas (FIX: Adicionado explicitamente)
     if hasattr(config, 'SHELLY_GAS_URL') and config.SHELLY_GAS_URL:
         status.append("Sensor de Gás")
+
     return jsonify({"status":"ok", "devices": {"toggles": toggles, "status": status}})
 
 @app.route("/device_status")
@@ -330,8 +353,15 @@ def api_action():
 
 @app.route("/help")
 def get_help():
-    cmds = {"diz": "TTS"}
-    for s in SKILLS_LIST: cmds[s["name"]] = s.get("trigger_type", "active")
+    cmds = {"diz": "TTS (Fala o que escreveres)"}
+    for s in SKILLS_LIST:
+        # Se existirem triggers, mostra a lista. Se não, mostra o tipo.
+        triggers = s.get("triggers", [])
+        if triggers:
+            # Junta os triggers numa string legível
+            cmds[s["name"]] = ", ".join(triggers[:5]) + ("..." if len(triggers) > 5 else "")
+        else:
+            cmds[s["name"]] = s.get("trigger_type", "active")
     return jsonify({"status": "ok", "commands": cmds})
 
 # --- MAIN LOOP ---
@@ -348,8 +378,7 @@ def main():
     if not engine.ready: return
 
     print("--- Phantasma ONLINE (Barge-in + UI) ---")
-    if is_quiet_time(): 
-        print(f"🌙 Modo Noturno Ativo ({QUIET_START}h - {QUIET_END}h)")
+    if is_quiet_time(): print(f"🌙 Modo Noturno Ativo ({QUIET_START}h - {QUIET_END}h)")
     
     trigger_streak = 0
     start_time = time.time()
@@ -377,7 +406,6 @@ def main():
                     else: trigger_streak = 0
 
                     if trigger_streak >= TRIGGER_PERSISTENCE:
-                        # --- CHECK MODO NOTURNO ---
                         if is_quiet_time():
                             if DEBUG_MODE: print("\n🌙 Shhh... (Modo Noturno)")
                             trigger_streak = 0
