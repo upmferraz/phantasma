@@ -1,6 +1,10 @@
 import os
 
 ALERT_EMAIL = "ALERT@EMAIL"
+# --- MODO NOTURNO (Silêncio) ---
+# Entre estas horas, o assistente ignora a Wake Word.
+QUIET_START = 0  # 00:00
+QUIET_END = 8    # 08:00
 
 # --- Caminhos Base ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,7 +20,9 @@ ALSA_DEVICE_OUT = "plughw:0,0"
 # --- WAKE WORD (openWakeWord) ---
 # Modelos possíveis: 'hey_jarvis', 'alexa', 'hey_mycroft', 'hey_rhasspy', 'timer', 'weather'
 # Podes colocar mais do que um: ['hey_jarvis', 'alexa']
-WAKEWORD_MODELS = ['hey_jarvis'] 
+WAKEWORD_MODELS = ['/opt/phantasma/models/hey_fantasma.onnx']
+WAKEWORD_CONFIDENCE = 0.5
+WAKEWORD_PERSISTENCE = 1
 
 # Sensibilidade (0.0 a 1.0). 
 # 0.5 é o padrão. 0.6 ou 0.7 é recomendado para evitar falsos positivos da TV.
