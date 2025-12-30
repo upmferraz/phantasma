@@ -63,34 +63,46 @@ def safe_play_tts(text, use_cache=True, request_id=None, speak=True):
     play_tts(text, use_cache=use_cache)
     IS_SPEAKING = False
 
-# --- FIX: VOLUME JABRA (LÊ DO CONFIG) ---
 def force_volume_down(card_index):
     """ 
     Aplica o volume definido no config APENAS aos canais de Captura (Mic).
-    Ignora PCM, Master, Speaker para não afetar a saída de som.
+    Tenta também DESATIVAR o AGC (Auto Gain Control) para evitar falsos positivos
+    causados pela flutuação do ruído de fundo.
     """
-    target = getattr(config, 'ALSA_VOLUME_PERCENT', 80)
+    # Baixei o default de 80 para 60. 80% num Jabra é demasiado "quente".
+    target = getattr(config, 'ALSA_VOLUME_PERCENT', 60)
     print(f"🎚️ A verificar volumes no Card {card_index} (Alvo: {target}%)...")
+    
     try:
+        # Lista todos os controlos do cartão
         cmd = ['amixer', '-c', str(card_index), 'scontrols']
         result = subprocess.run(cmd, capture_output=True, text=True)
+        # Regex para apanhar o nome entre plicas simples 'Nome'
         controls = re.findall(r"Simple mixer control '([^']+)'", result.stdout)
         
         if not controls: return
 
         for ctrl in controls:
-            # FILTRO DE SEGURANÇA: Só mexe se for Entrada
-            if 'PCM' in ctrl or 'Master' in ctrl or 'Speaker' in ctrl or 'Headphone' in ctrl:
-                print(f"   🛑 Ignorando saída: '{ctrl}'")
+            # FILTRO DE SEGURANÇA: Ignora saídas de som
+            if any(x in ctrl for x in ['PCM', 'Master', 'Speaker', 'Headphone', 'Playback']):
                 continue
             
+            # 1. Ajuste de Volume (Capture/Mic)
             if 'Capture' in ctrl or 'Mic' in ctrl:
                 print(f"   ↘ Ajustando entrada: '{ctrl}' -> {target}%")
                 subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, f'{target}%', 'unmute', 'cap'], 
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except: pass
+            
+            # 2. CRÍTICO: Desativar AGC (Auto Gain Control)
+            # Isto impede que o microfone aumente a sensibilidade no silêncio
+            if 'AGC' in ctrl or 'Auto Gain' in ctrl:
+                print(f"   🚫 A desativar AGC: '{ctrl}'")
+                subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, 'off'], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-# --- FIX: SAMPLE RATE ---
+    except Exception as e: 
+        print(f"⚠️ Erro ao ajustar volumes: {e}")
+
 def find_working_samplerate(device_index):
     candidates = [48000, 44100, 32000, 16000]
     print(f"🕵️ A negociar Sample Rate para o device {device_index}...")
